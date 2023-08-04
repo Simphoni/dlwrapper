@@ -6,6 +6,8 @@
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
 
+using dtype_torch = c10::ScalarType;
+
 class ProcessGroupNico : public c10d::ProcessGroupNCCL {
 public:
   std::pair<ncclComm_t, int> getComm(at::Device dev);

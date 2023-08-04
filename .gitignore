@@ -4,3 +4,4 @@ dist/
 *.json
 *.egg-info
 *.so
+core.*

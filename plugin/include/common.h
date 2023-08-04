@@ -6,14 +6,16 @@
 #define PLUGIN_ENABLE_NCCL
 #define PLUGIN_ENABLE_DEBUG
 
+#include <cstdio>
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <cstdio>
+#include <iostream>
 
 #define CUDA_SAFE_CALL(__fn__) _cuda_safe_call(__fn__, __FILE__, __LINE__)
 inline void _cuda_safe_call(cudaError_t err, const char *file, int line) {
   if (err != cudaSuccess) {
-    fprintf(stderr, "CUDA Error at %s:%d message %s\n", file, line, cudaGetErrorName(err));
+    fprintf(stderr, "CUDA Error at %s:%d message %s\n", file, line,
+            cudaGetErrorName(err));
     exit(-1);
   }
 }
@@ -34,7 +36,8 @@ inline void _nccl_safe_call(ncclResult_t err, const char *file, int line) {
 #endif
 
 #ifdef PLUGIN_ENABLE_DEBUG
-#define DEBUG(fmt, ...) fprintf(stderr, "%s:%d\t" fmt "\n", __FILE__, __LINE__, __VA_ARGS__)
+#define DEBUG(fmt, ...)                                                        \
+  fprintf(stderr, "%s:%d\t" fmt "\n", __FILE__, __LINE__, __VA_ARGS__)
 #else
 #define DEBUG(...)
 #endif

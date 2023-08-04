@@ -10,8 +10,8 @@ class CudaContextManager {
   // get the handles & streams from its singleton instance
 private:
   static constexpr int STREAMS_CAP = 4;
-  static CudaContextManager *p_manager;
-  cudaStream_t *p_streams;
+  static CudaContextManager *_manager;
+  cudaStream_t *_streams;
   ncclComm_t comm;
   int local_rank;
 
@@ -19,25 +19,30 @@ private:
     // create singleton instance
     // always assume we work on one device, aka index==0
     CUDA_SAFE_CALL(cudaSetDevice(0));
-    p_streams = new cudaStream_t[STREAMS_CAP];
+    _streams = new cudaStream_t[STREAMS_CAP];
     for (int i = 0; i < STREAMS_CAP; i++) {
-      CUDA_SAFE_CALL(cudaStreamCreate(&p_streams[i]));
+      CUDA_SAFE_CALL(cudaStreamCreate(&_streams[i]));
     }
   }
 
 public:
   static CudaContextManager *get() {
-    if (p_manager != nullptr) // most cases
-      return p_manager;
+    if (_manager != nullptr) // most cases
+      return _manager;
     std::lock_guard<std::mutex> guard(_mu);
-    if (p_manager == nullptr)
-      p_manager = new CudaContextManager();
-    return p_manager;
+    if (_manager == nullptr)
+      _manager = new CudaContextManager();
+    return _manager;
   }
 
-  cudaStream_t getStream(int idx) {
+  cudaStream_t stream(int idx = 0) {
     assert(idx < STREAMS_CAP);
-    return p_streams[idx];
+    return _streams[idx];
+  }
+
+  void sync(int idx = 0) {
+    assert(idx < STREAMS_CAP);
+    CUDA_SAFE_CALL(cudaStreamSynchronize(_streams[idx]));
   }
 
   void setCommWorld(std::pair<ncclComm_t, int> _comm) {
@@ -50,4 +55,4 @@ public:
   }
 };
 
-CudaContextManager *CudaContextManager::p_manager = nullptr;
+CudaContextManager *CudaContextManager::_manager = nullptr;
