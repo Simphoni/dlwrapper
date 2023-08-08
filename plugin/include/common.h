@@ -10,8 +10,12 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <iostream>
+#include <string>
 
-#define CUDA_SAFE_CALL(__fn__) _cuda_safe_call(__fn__, __FILE__, __LINE__)
+/* /cpfs01/user/xingjingze/dlwrapper/plugin/include/device_manager.h */
+#define __FILE_BRIEF__ std::string(__FILE__).substr(41).data()
+
+#define CUDA_SAFE_CALL(__fn__) _cuda_safe_call(__fn__, __FILE_BRIEF__, __LINE__)
 inline void _cuda_safe_call(cudaError_t err, const char *file, int line) {
   if (err != cudaSuccess) {
     fprintf(stderr, "CUDA Error at %s:%d message %s\n", file, line,
@@ -25,7 +29,7 @@ inline void _cuda_safe_call(cudaError_t err, const char *file, int line) {
 #define USE_C10D_NCCL // enable ProcessGroupNCCL
 #include "nccl.h"
 
-#define NCCL_SAFE_CALL(__fn__) _nccl_safe_call(__fn__, __FILE__, __LINE__)
+#define NCCL_SAFE_CALL(__fn__) _nccl_safe_call(__fn__, __FILE_BRIEF__, __LINE__)
 inline void _nccl_safe_call(ncclResult_t err, const char *file, int line) {
   if (err != ncclSuccess) {
     fprintf(stderr, "NCCL Error at %s:%d value %d\n", file, line, err);
@@ -37,7 +41,7 @@ inline void _nccl_safe_call(ncclResult_t err, const char *file, int line) {
 
 #ifdef PLUGIN_ENABLE_DEBUG
 #define DEBUG(fmt, ...)                                                        \
-  fprintf(stderr, "%s:%d\t" fmt "\n", __FILE__, __LINE__, __VA_ARGS__)
+  fprintf(stderr, "%s:%d\t" fmt "\n", __FILE_BRIEF__, __LINE__, __VA_ARGS__)
 #else
 #define DEBUG(...)
 #endif
