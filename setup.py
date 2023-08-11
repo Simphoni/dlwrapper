@@ -6,11 +6,18 @@ from setuptools import setup
 from torch.utils import cpp_extension
 
 plugin_path = "plugin"
-sources = [f"{plugin_path}/src/nico.cpp", f"{plugin_path}/src/export.cpp"]
+sources = [
+    f"{plugin_path}/src/nico.cpp",
+    f"{plugin_path}/src/export.cpp",
+    f"{plugin_path}/src/device_manager.cpp",
+]
 include_dirs = [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), plugin_path, "include"),
 ]
-cxx_flags = ["-O3"]
+cxx_flags = [
+    "-O3",
+    "-lrt",  # librt for POSIX shared memory objects
+]
 
 module = cpp_extension.CUDAExtension(
     name="dlwrapper",

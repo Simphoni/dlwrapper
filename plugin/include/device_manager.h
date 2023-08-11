@@ -1,46 +1,106 @@
 #pragma once
+#include "common.h"
 #include <cassert>
-#include <common.h>
 #include <map>
 #include <mutex>
+#include <semaphore.h>
 #include <string>
+#include <sys/ipc.h>
+#include <sys/sem.h>
+#include <sys/shm.h>
+#include <sys/types.h>
 
 static std::mutex _mu;
 
-class CudaContextManager {
-  // cuda environment manager
+class DeviceContextManager {
+  // device environment manager - cuda & unix ipc
   // get the handles & streams from its singleton instance
 private:
+  static constexpr int MAX_PROCS = 8;
   static constexpr int STREAMS_CAP = 4;
-  static CudaContextManager *_manager;
+  static constexpr int IPC_KEY = 0xbada991e; // bad apple
+  static constexpr int IPC_SHMEM_SEG_SIZE = 1 << 10;
+  static constexpr int IPC_PROC_SEG_SIZE = 1 << 6;
+  static DeviceContextManager *_manager;
   cudaStream_t *_streams;
   ncclComm_t comm;
-  int local_rank;
-  int world_size;
+  bool initialized;
+  bool peer_access_enabled;
+
+  // topo info
+  int worldSize;
+  int worldRank;   // rank in world
+  int nodeCount;   // node count in world
+  int nodeRank;    // node rank in world
+  int deviceCount; // devices per node
+  int localRank;   // rank in node
+
+  // IPC data structures
+  int shmid, semid;
+  int segment_offset;
+  char *shmdata;
+  char *recvbuf[MAX_PROCS];
+
   // internal profiler with cuda initiatives
   std::map<std::string, cudaEvent_t> _events[STREAMS_CAP];
   std::map<std::string, std::pair<float, int>> _cumtime;
 
-  CudaContextManager() {
+  DeviceContextManager() {
     // create singleton instance
-    // always assume we work on one device, aka index==0
-    CUDA_SAFE_CALL(cudaSetDevice(0));
-    _streams = new cudaStream_t[STREAMS_CAP];
-    for (int i = 0; i < STREAMS_CAP; i++) {
-      CUDA_SAFE_CALL(cudaStreamCreate(&_streams[i]));
-    }
+    initialized = false;
+    peer_access_enabled = false;
+    cudaGetDeviceCount(&deviceCount);
+    assert(deviceCount > 0);
   }
 
 public:
   // return singleton instance
-  static CudaContextManager *get() {
+  static DeviceContextManager *get() {
     if (_manager != nullptr) // most cases
       return _manager;
     _mu.lock();
     if (_manager == nullptr)
-      _manager = new CudaContextManager();
+      _manager = new DeviceContextManager();
     _mu.unlock();
     return _manager;
+  }
+
+  // initialize communicator and other info
+  void set_comm_world(std::pair<ncclComm_t, int> _comm) {
+    _mu.lock();
+    assert(initialized == false);
+    initialized = true;
+    comm = _comm.first;
+    worldRank = _comm.second >> 12;
+    worldSize = _comm.second & ((1 << 12) - 1);
+    nodeCount = worldSize / deviceCount;
+    assert(nodeCount * deviceCount == worldSize);
+    localRank = worldRank % deviceCount;
+    nodeRank = worldRank / deviceCount;
+
+    _streams = new cudaStream_t[STREAMS_CAP];
+    for (int i = 0; i < STREAMS_CAP; i++) {
+      CUDA_SAFE_CALL(cudaStreamCreate(&_streams[i]));
+    }
+    _mu.unlock();
+  }
+
+  void ipc_init_process_group();
+
+  void enable_peer_access() {
+    if (peer_access_enabled) {
+      return;
+    }
+    _mu.lock();
+    for (int i = 0; i < deviceCount; i++) {
+      if (i == localRank) {
+        continue;
+      }
+      CUDA_SAFE_CALL(cudaDeviceEnablePeerAccess(i, 0));
+    }
+    ipc_init_process_group();
+    peer_access_enabled = true;
+    _mu.unlock();
   }
 
   // get the specified cuda stream
@@ -55,81 +115,21 @@ public:
     CUDA_SAFE_CALL(cudaStreamSynchronize(_streams[idx]));
   }
 
-  // initialize communicator and other info
-  void setCommWorld(std::pair<ncclComm_t, int> _comm) {
-    _mu.lock();
-    comm = _comm.first;
-    local_rank = _comm.second >> 12;
-    world_size = _comm.second & ((1 << 12) - 1);
-    _mu.unlock();
-  }
+  ncclComm_t get_comm_world() const { return comm; }
 
-  ncclComm_t getCommWorld() const { return comm; }
+  int get_local_rank() const { return localRank; }
 
-  int getRank() const { return local_rank; }
-
-  int getWorldSize() const { return world_size; }
+  int get_world_size() const { return worldSize; }
 
   // place a notifier in the specified stream,
   // bind with a std::string to identifiy
-  void event_start(std::string s, int idx = 0) {
-    cudaEvent_t e;
-    cudaEventCreate(&e);
-    cudaEventRecord(e, _streams[idx]);
-    _mu.lock();
-    assert(_events[idx].find(s) == _events[idx].end());
-    _events[idx][s] = e;
-    _mu.unlock();
-  }
+  void event_start(std::string s, int idx = 0);
 
-  float event_stop(std::string s, int idx = 0) {
-    cudaEvent_t e;
-    cudaEventCreate(&e);
-    cudaEventRecord(e, _streams[idx]);
-    sync(idx);
-    _mu.lock();
-    auto it = _events[idx].find(s);
-    assert(it != _events[idx].end());
-    auto start_e = it->second;
-    _events[idx].erase(it);
-    float ellapsed_ms = 0;
-    cudaEventElapsedTime(&ellapsed_ms, start_e, e);
-    auto map_it = _cumtime.find(s);
-    if (map_it == _cumtime.end()) {
-      _cumtime[s] = std::make_pair(ellapsed_ms, 1);
-    } else {
-      map_it->second.first += ellapsed_ms;
-      map_it->second.second++;
-    }
-    _mu.unlock();
-    cudaEventDestroy(start_e);
-    cudaEventDestroy(e);
-    return ellapsed_ms;
-  }
+  float event_stop(std::string s, int idx = 0);
 
-  void manual_record(std::string s, float ellapsed_ms) {
-    _mu.lock();
-    auto map_it = _cumtime.find(s);
-    if (map_it == _cumtime.end()) {
-      _cumtime[s] = std::make_pair(ellapsed_ms, 1);
-    } else {
-      map_it->second.first += ellapsed_ms;
-      map_it->second.second++;
-    }
-    _mu.unlock();
-  }
+  void manual_record(std::string s, float ellapsed_ms);
 
-  void export_summary() const {
-    _mu.lock();
-    DEBUG(
-        "rank[%d]: time summary for %ld events: (item / total_ms / evoke_num)",
-        local_rank, _cumtime.size());
-    for (auto const kv : _cumtime) {
-      DEBUG("rank[%d]: %s\t%f\t%d", local_rank, kv.first.data(),
-            kv.second.first, kv.second.second);
-    }
-    _mu.unlock();
-  }
+  void export_summary() const;
+
+  char **ipc_allgather(char *input, size_t bytes);
 };
-
-CudaContextManager *CudaContextManager::_manager = nullptr;

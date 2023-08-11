@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import torch  # torch must be imported ahead of dlwrapper
 import torch.distributed as dist
@@ -9,7 +10,9 @@ local_rank, world_size = 0, 0
 
 def init_nico():
     dlwrapper.nico.init_nccl(
-        dist.distributed_c10d._get_default_group(), torch.device("cuda:0")
+        pg=dist.distributed_c10d._get_default_group(),
+        device=torch.device("cuda:0"),
+        enable_uva=True,
     )
 
 
@@ -74,20 +77,39 @@ def allgather_into_tensor():
     print(f"rank {local_rank}: {dst.sum()}, {time_in_s * 1000} ms, {G / time_in_s}GB/s")
 
 
+def p2p():
+    G = 4
+    bytes = G * 1024 * 1024 * 1024
+    ten0: torch.Tensor = torch.randn(bytes // 32, dtype=torch.float32, device="cuda:0")
+    ten1: torch.Tensor = torch.randn(bytes // 32, dtype=torch.float32, device="cuda:1")
+    for _ in range(50):
+        dlwrapper.nico.memcpy_peer(ten0, ten1, 1, bytes, False)
+    for _ in range(50):
+        dlwrapper.nico.memcpy_peer(ten0, ten1, 1, bytes, True)
+    print(ten0.sum(), ten1.sum())
+
+
 if os.getenv("RANK") != None:
     # if __name__ == "__main__":
     local_rank = int(os.getenv("RANK"))
     world_size = int(os.getenv("WORLD_SIZE"))
-    os.environ["CUDA_VISIBLE_DEVICES"] = f"{local_rank}"
-    torch.cuda.set_device("cuda:0")
+    # os.environ["CUDA_VISIBLE_DEVICES"] = f"{local_rank}"
+    # torch.cuda.set_device("cuda:0")
     dist.init_process_group(
         backend="nccl", init_method="env://", world_size=world_size, rank=local_rank
     )
 
     init_nico()
-    allgather_into_tensor()
-    if local_rank == 0:
-        dlwrapper.nico.export_summary()
+    a = torch.randn(20, 30, dtype=float)
+    start_tick = time.perf_counter_ns()
+    ROUNDS = 1000
+    for i in range(ROUNDS):
+        dlwrapper.nico.testing(a)
+    end_tick = time.perf_counter_ns()
+    time_in_s = (end_tick - start_tick) / 1e9 / PERF_ROUND
+    print(f"operation ave cost {time_in_s * 1000 / ROUNDS} ms")
+    sys.exit(0)
+    # allgather_into_tensor()
 else:
     a = torch.randn(20, 30, dtype=float)
     dlwrapper.nico.testing(a)
