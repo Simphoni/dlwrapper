@@ -10,6 +10,7 @@ sources = [
     f"{plugin_path}/src/nico.cpp",
     f"{plugin_path}/src/export.cpp",
     f"{plugin_path}/src/device_manager.cpp",
+    f"{plugin_path}/src/unit_test.cpp",
 ]
 include_dirs = [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), plugin_path, "include"),

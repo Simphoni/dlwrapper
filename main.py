@@ -101,15 +101,17 @@ if os.getenv("RANK") != None:
 
     init_nico()
     a = torch.randn(20, 30, dtype=float)
+    ROUNDS = 500
+    for i in range(ROUNDS):
+        dlwrapper.nico.testing(a)
     start_tick = time.perf_counter_ns()
-    ROUNDS = 1000
     for i in range(ROUNDS):
         dlwrapper.nico.testing(a)
     end_tick = time.perf_counter_ns()
-    time_in_s = (end_tick - start_tick) / 1e9 / PERF_ROUND
-    print(f"operation ave cost {time_in_s * 1000 / ROUNDS} ms")
+    time_in_s = (end_tick - start_tick) / 1e9
+    print(f"rank {local_rank}: operation ave cost {time_in_s * 1000 / ROUNDS} ms")
     sys.exit(0)
     # allgather_into_tensor()
 else:
     a = torch.randn(20, 30, dtype=float)
-    dlwrapper.nico.testing(a)
+    dlwrapper.nico.testing()

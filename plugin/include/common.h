@@ -6,6 +6,7 @@
 #define PLUGIN_ENABLE_NCCL
 #define PLUGIN_ENABLE_DEBUG
 
+#include <cassert>
 #include <cstdio>
 #include <cuda.h>
 #include <cuda_runtime.h>

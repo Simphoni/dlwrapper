@@ -1,6 +1,5 @@
 #pragma once
 #include "common.h"
-#include <cassert>
 #include <map>
 #include <mutex>
 #include <semaphore.h>
@@ -9,6 +8,7 @@
 #include <sys/sem.h>
 #include <sys/shm.h>
 #include <sys/types.h>
+#include <vector>
 
 static std::mutex _mu;
 
@@ -39,7 +39,7 @@ private:
   int shmid, semid;
   int segment_offset;
   char *shmdata;
-  char *recvbuf[MAX_PROCS];
+  char recvbuf[IPC_SHMEM_SEG_SIZE];
 
   // internal profiler with cuda initiatives
   std::map<std::string, cudaEvent_t> _events[STREAMS_CAP];
@@ -131,5 +131,8 @@ public:
 
   void export_summary() const;
 
-  char **ipc_allgather(char *input, size_t bytes);
+  // ~ 18us
+  char *ipc_allgather(const void *input, size_t bytes);
+
+  void ipc_allgather_device_pointer(std::vector<void *> &ptrs);
 };

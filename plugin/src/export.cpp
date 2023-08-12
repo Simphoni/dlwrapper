@@ -3,18 +3,7 @@
 #include "nico.h"
 #include <torch/extension.h>
 
-void testing(torch::Tensor t) {
-  static int callnum = 0;
-  callnum++;
-  auto manager = DeviceContextManager::get();
-  int data = manager->get_local_rank() + callnum;
-  char **result = manager->ipc_allgather((char *)&data, sizeof(int));
-  int res[8];
-  for (int i = 0; i < 8; i++) {
-    res[i] = *reinterpret_cast<int *>(result[i]);
-    assert(res[i] == callnum + i);
-  }
-}
+void test_ipc_allgather();
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "An extensively tailored CUDA library for machine learning.";
@@ -36,5 +25,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              "Export Nico's internal performance summary.");
   m_nico.def("memcpy_peer", &_memcpy_peer, "feature during testing");
 
-  m_nico.def("testing", &testing, "A testing function.");
+  m_nico.def("testing", &test_ipc_allgather, "A testing function.");
 }

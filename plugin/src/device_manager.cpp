@@ -63,12 +63,8 @@ void DeviceContextManager::export_summary() const {
 
 void DeviceContextManager::ipc_init_process_group() {
   assert(initialized == true);
-  shmid = shmget(IPC_KEY, IPC_SHMEM_SEG_SIZE, 0644 | IPC_CREAT);
+  shmid = shmget(IPC_KEY, IPC_SHMEM_SEG_SIZE, 0666 | IPC_CREAT);
   assert(shmid != -1);
-  segment_offset = localRank * IPC_PROC_SEG_SIZE;
-  for (int i = 0; i < MAX_PROCS; i++) {
-    recvbuf[i] = new char[IPC_PROC_SEG_SIZE];
-  }
   /*
   ** allocate 3 semaphores,
   ** sem[0] write lock
@@ -77,59 +73,46 @@ void DeviceContextManager::ipc_init_process_group() {
   ** when rank0 realizes that all processes have incremented the counter, it
   ** enables the read lock
   */
-  semid = semget(IPC_KEY, 3, 0644 | IPC_CREAT);
+  semid = semget(IPC_KEY, 3, 0666 | IPC_CREAT);
   assert(semid != -1);
+  shmdata = (char *)shmat(shmid, NULL, 0);
 }
 
-char **DeviceContextManager::ipc_allgather(char *input, size_t bytes) {
-  // gather all `input` data into `recvbuf[]`
-  // shared memory attach/detach must be done here
-  // to ensure the input data gets flushed into memory
+char *DeviceContextManager::ipc_allgather(const void *input, size_t bytes) {
+  // gather all `input` data into `recvbuf`
+  // shared memory needn't remap to ensure coherence
   assert(bytes <= IPC_PROC_SEG_SIZE);
-  struct sembuf write_wait = {0, -1, 0};
-  struct sembuf write_release = {0, 1, 0};
-  struct sembuf read_wait = {1, -1, 0};
-  struct sembuf read_release = {1, 1, 0};
-  struct sembuf counter_wait = {2, -(short)deviceCount, 0};
-  struct sembuf counter_release = {2, 1, 0};
+  static struct sembuf write_wait = {0, -1, 0};
+  static struct sembuf write_free = {0, (short)deviceCount, 0};
+  static struct sembuf write_exhaust = {0, 0, 0};
+  static struct sembuf read_wait = {1, -1, 0};
+  static struct sembuf read_free = {1, (short)deviceCount, 0};
+  static struct sembuf read_exhaust = {1, 0, 0};
 
+  // data is placed tightly in shared memory
+  segment_offset = localRank * bytes;
   if (localRank == 0) {
     // enable write lock
-    assert(semop(semid, &write_release, 1) != -1);
+    semop(semid, &write_free, 1);
   }
-  assert(semop(semid, &write_wait, 1) != -1);
-  shmdata = (char *)shmat(shmid, NULL, 0);
+  // write begin after master has enabled write lock
   if (input != NULL) {
     memcpy(shmdata + segment_offset, input, bytes);
   } else {
     memset(shmdata + segment_offset, 0, bytes);
   }
-  shmdt(shmdata);
-  assert(semop(semid, &write_release, 1) != -1);
-  // update counter
-  assert(semop(semid, &counter_release, 1) != -1);
-
+  // signal write completion
+  semop(semid, &write_wait, 1);
+  // wait until all processes have written
+  // read can begin immediately
+  semop(semid, &write_exhaust, 1);
   if (localRank == 0) {
-    //! wait lock must be taken before read
-    //! other processes may proceed to next allgather, stop them
-    assert(semop(semid, &counter_wait, 1) != -1);
-    assert(semop(semid, &write_wait, 1) != -1);
-    assert(semop(semid, &read_release, 1) != -1);
+    semop(semid, &read_free, 1);
   }
-  assert(semop(semid, &read_wait, 1) != -1);
-  shmdata = (char *)shmat(shmid, NULL, 0);
-  for (int i = 0; i < deviceCount; i++) {
-    memcpy(recvbuf[i], shmdata + i * IPC_PROC_SEG_SIZE, bytes);
-  }
-  shmdt(shmdata);
-  assert(semop(semid, &read_release, 1) != -1);
-  // update counter
-  assert(semop(semid, &counter_release, 1) != -1);
-  if (localRank == 0) {
-    //! all semaphore must be reset to 0 before the next allgather
-    //! must wait for all processes to release the read lock
-    assert(semop(semid, &counter_wait, 1) != -1);
-    assert(semop(semid, &read_wait, 1) != -1);
-  }
+  memcpy(recvbuf, shmdata, bytes * deviceCount);
+  // signal read completion
+  semop(semid, &read_wait, 1);
+  // wait until all processes have read
+  semop(semid, &read_exhaust, 1);
   return recvbuf;
 }
