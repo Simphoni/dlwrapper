@@ -6,10 +6,10 @@ void test_ipc_allgather() {
   static int callnum = 0;
   callnum++;
   auto manager = DeviceContextManager::get();
+  auto pg = manager->get_process_group(0);
   int data = manager->get_local_rank() + callnum;
   int array[] = {data, data, data, data};
-  int *result =
-      (int *)manager->ipc_allgather((char *)&array[0], sizeof(int) * 4);
+  int *result = (int *)pg->ipc_allgather((char *)&array[0], sizeof(int) * 4);
   for (int i = 0, res; i < 8; i++) {
     for (int j = 0; j < 4; j++) {
       res = result[i * 4 + j];

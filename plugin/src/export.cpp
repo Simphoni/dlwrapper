@@ -23,7 +23,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              "Nico's allgather operation w/ recursive doubling.");
   m_nico.def("export_summary", &_manager_export_summary,
              "Export Nico's internal performance summary.");
-  m_nico.def("memcpy_peer", &_memcpy_peer, "feature during testing");
 
   m_nico.def("testing", &test_ipc_allgather, "A testing function.");
 }

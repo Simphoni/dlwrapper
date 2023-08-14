@@ -77,18 +77,6 @@ def allgather_into_tensor():
     print(f"rank {local_rank}: {dst.sum()}, {time_in_s * 1000} ms, {G / time_in_s}GB/s")
 
 
-def p2p():
-    G = 4
-    bytes = G * 1024 * 1024 * 1024
-    ten0: torch.Tensor = torch.randn(bytes // 32, dtype=torch.float32, device="cuda:0")
-    ten1: torch.Tensor = torch.randn(bytes // 32, dtype=torch.float32, device="cuda:1")
-    for _ in range(50):
-        dlwrapper.nico.memcpy_peer(ten0, ten1, 1, bytes, False)
-    for _ in range(50):
-        dlwrapper.nico.memcpy_peer(ten0, ten1, 1, bytes, True)
-    print(ten0.sum(), ten1.sum())
-
-
 if os.getenv("RANK") != None:
     # if __name__ == "__main__":
     local_rank = int(os.getenv("RANK"))

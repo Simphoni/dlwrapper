@@ -16,7 +16,7 @@ include_dirs = [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), plugin_path, "include"),
 ]
 cxx_flags = [
-    "-O3",
+    "-Ofast",
     "-lrt",  # librt for POSIX shared memory objects
 ]
 

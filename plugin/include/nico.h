@@ -30,6 +30,4 @@ void _broadcast(torch::Tensor t, bool prof);
 void _allgather_into_tensor_doubling(torch::Tensor dst, torch::Tensor src,
                                      bool prof);
 
-void _memcpy_peer(torch::Tensor dst, torch::Tensor src, int bytes, int peer,
-                  bool prof);
 void _manager_export_summary();
