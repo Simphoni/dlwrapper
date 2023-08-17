@@ -15,13 +15,14 @@ using dtype_torch = c10::ScalarType;
 
 class ProcessGroupNico : public c10d::ProcessGroupNCCL {
 public:
-  std::pair<ncclComm_t, int> getComm(at::Device dev);
+  std::pair<ncclComm_t, int> getComm();
 };
 
 void _sync_stream(int idx = 0);
 
-void _init_nccl(c10d::ProcessGroupNCCL &p, at::Device dev,
-                bool enable_uva = false);
+void _init_nico(c10d::ProcessGroupNCCL &p, bool enable_uva = false);
+
+void _destroy_nico();
 
 void _sendrecv(torch::Tensor t, int src_rnk, int dst_rnk, bool prof);
 
@@ -29,5 +30,8 @@ void _broadcast(torch::Tensor t, bool prof);
 
 void _allgather_into_tensor_doubling(torch::Tensor dst, torch::Tensor src,
                                      bool prof);
+
+void _allgather_with_peer_access(torch::Tensor dst, torch::Tensor src,
+                                 int idx = 0, bool prof = false);
 
 void _manager_export_summary();

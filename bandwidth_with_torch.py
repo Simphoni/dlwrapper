@@ -5,8 +5,8 @@ import time
 import datetime
 
 
-WARMUP_ROUND = 5
-PERF_ROUND = 20
+WARMUP_ROUND = 50
+PERF_ROUND = 50
 rank, world = 0, 0
 
 
@@ -113,4 +113,5 @@ if __name__ == "__main__":
         timeout=datetime.timedelta(0, nccl_timeout),
     )
     process_group = dist.new_group([i for i in range(world)])
+    test_allgather(4 * 1024 * 1024 * 1024, process_group)
     test_sendrecv(4 * 1024 * 1024 * 1024, process_group)

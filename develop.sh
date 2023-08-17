@@ -12,4 +12,5 @@ else
 fi
 unset __conda_setup
 conda activate nerf
+cd plugin
 MAX_JOBS=6 python setup.py develop --prefix=${HOME}/.local

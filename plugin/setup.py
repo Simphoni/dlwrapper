@@ -5,19 +5,18 @@ import torch
 from setuptools import setup
 from torch.utils import cpp_extension
 
-plugin_path = "plugin"
 sources = [
-    f"{plugin_path}/src/nico.cpp",
-    f"{plugin_path}/src/export.cpp",
-    f"{plugin_path}/src/device_manager.cpp",
-    f"{plugin_path}/src/unit_test.cpp",
+    "src/nico.cpp",
+    "src/export.cpp",
+    "src/device_manager.cpp",
+    "src/unit_test.cpp",
 ]
 include_dirs = [
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), plugin_path, "include"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "include"),
 ]
 cxx_flags = [
-    "-Ofast",
     "-lrt",  # librt for POSIX shared memory objects
+    "-UNDEBUG",
 ]
 
 module = cpp_extension.CUDAExtension(
@@ -30,5 +29,6 @@ module = cpp_extension.CUDAExtension(
 setup(
     name="DLWrapper",
     ext_modules=[module],
+    packages=["nico"],
     cmdclass={"build_ext": cpp_extension.BuildExtension},
 )

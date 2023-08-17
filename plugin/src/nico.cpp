@@ -1,7 +1,7 @@
 #include <device_manager.h>
 #include <nico.h>
 
-std::pair<ncclComm_t, int> ProcessGroupNico::getComm(at::Device dev) {
+std::pair<ncclComm_t, int> ProcessGroupNico::getComm() {
   ncclUniqueId ncclID;
   int rank = getRank();
   int world_size = getSize();
@@ -15,13 +15,15 @@ std::pair<ncclComm_t, int> ProcessGroupNico::getComm(at::Device dev) {
   return std::make_pair(comm, rank << 12 | world_size);
 }
 
-void _init_nccl(c10d::ProcessGroupNCCL &p, at::Device dev, bool enable_uva) {
+void _init_nico(c10d::ProcessGroupNCCL &p, bool enable_uva) {
   ProcessGroupNico *h = static_cast<ProcessGroupNico *>(&p);
-  DeviceContextManager::get()->set_comm_world(h->getComm(dev));
+  DeviceContextManager::get()->set_comm_world(h->getComm());
   if (enable_uva) {
     DeviceContextManager::get()->enable_peer_access();
   }
 }
+
+void _destroy_nico() { DeviceContextManager::get()->destroy_existing_pg(); }
 
 void _sync_stream(int idx) { DeviceContextManager::get()->sync(idx); }
 
@@ -145,6 +147,17 @@ void _allgather_into_tensor_doubling(torch::Tensor dst, torch::Tensor src,
   }
 }
 #undef ALIGN_EXP2
+
+void _allgather_with_peer_access(torch::Tensor dst, torch::Tensor src, int idx,
+                                 bool prof) {
+  assert(dst.is_contiguous());
+  assert(src.is_contiguous());
+  auto pg = DeviceContextManager::get()->get_process_group(idx);
+  float *dstbuf = dst.data_ptr<float>();
+  float *srcbuf = src.data_ptr<float>();
+  pg->allgather_with_peer_access((char *)dstbuf, (char *)srcbuf,
+                                 dst.numel() * 4, src.numel() * 4, prof);
+}
 
 void _manager_export_summary() {
   DeviceContextManager::get()->export_summary();

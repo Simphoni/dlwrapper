@@ -1,6 +1,17 @@
 #include "device_manager.h"
+#include <chrono>
+#include <unistd.h>
+namespace ch = std::chrono;
 
 DeviceContextManager *DeviceContextManager::_manager = nullptr;
+
+void DeviceContextManager::destroy_existing_pg() {
+  DEBUG("rank[%d]: destroying all existing process groups.", worldRank);
+  for (auto pg : procGroups) {
+    delete pg;
+  }
+  procGroups.clear();
+}
 
 void DeviceContextManager::set_comm_world(std::pair<ncclComm_t, int> _comm) {
   _mu.lock();
@@ -14,8 +25,8 @@ void DeviceContextManager::set_comm_world(std::pair<ncclComm_t, int> _comm) {
   localRank = worldRank % deviceCount;
   nodeRank = worldRank / deviceCount;
 
-  _streams = new cudaStream_t[STREAMS_CAP];
-  for (int i = 0; i < STREAMS_CAP; i++) {
+  _streams = new cudaStream_t[MAX_STREAMS];
+  for (int i = 0; i < MAX_STREAMS; i++) {
     CUDA_SAFE_CALL(cudaStreamCreate(&_streams[i]));
   }
   std::vector<int> members;
@@ -23,16 +34,16 @@ void DeviceContextManager::set_comm_world(std::pair<ncclComm_t, int> _comm) {
     members.push_back(i + nodeRank * deviceCount);
   }
   // initialize a default process group
-  procGroups.emplace_back(std::shared_ptr<NicoProcessGroup>(
-      new NicoProcessGroup(members, IPC_KEY_BASE + 0)));
+  procGroups.emplace_back(
+      new NicoProcessGroup(members, IPC_KEY_MASTER + 0 * IPC_KEY_PER_GROUP, 0));
   _mu.unlock();
 }
 
 void DeviceContextManager::enable_peer_access() {
+  _mu.lock();
   if (peerAccessEnabled) {
     return;
   }
-  _mu.lock();
   for (int i = 0; i < deviceCount; i++) {
     if (i == localRank) {
       continue;
@@ -40,8 +51,9 @@ void DeviceContextManager::enable_peer_access() {
     CUDA_SAFE_CALL(cudaDeviceEnablePeerAccess(i, 0));
   }
   peerAccessEnabled = true; // pg will check this flag
+  DEBUG("rank[%d] cudaDeviceEnablePeerAccess succeeded.", worldRank);
   for (const auto &pg : procGroups) {
-    if (pg->is_local())
+    if (pg->is_intranode())
       pg->ipc_init_process_group();
   }
   _mu.unlock();
@@ -52,8 +64,8 @@ int DeviceContextManager::create_process_group(
   _mu.lock();
   assert(initialized);
   int ret = procGroups.size();
-  procGroups.emplace_back(std::shared_ptr<NicoProcessGroup>(
-      new NicoProcessGroup(members, IPC_KEY_BASE + ret)));
+  procGroups.emplace_back(new NicoProcessGroup(
+      members, IPC_KEY_MASTER + ret * IPC_KEY_PER_GROUP, ret));
   if (peerAccessEnabled) {
     procGroups[ret]->ipc_init_process_group();
   }
@@ -110,12 +122,12 @@ void DeviceContextManager::manual_record(std::string s, float ellapsed_ms) {
 
 void DeviceContextManager::export_summary() const {
   _mu.lock();
-  DEBUG("rank[%d]: time summary for %ld events: (item / total_ms / "
-        "evoke_num)",
-        localRank, _cumtime.size());
+  INFO("rank[%d]: time summary for %ld events: (item / total_ms / "
+       "evoke_num)",
+       localRank, _cumtime.size());
   for (auto const kv : _cumtime) {
-    DEBUG("rank[%d]: %s\t%f\t%d", localRank, kv.first.data(), kv.second.first,
-          kv.second.second);
+    INFO("rank[%d]: %s\t%f\t%d", localRank, kv.first.data(), kv.second.first,
+         kv.second.second);
   }
   _mu.unlock();
 }
@@ -123,8 +135,9 @@ void DeviceContextManager::export_summary() const {
 // -------------------------- NicoProcessGroup --------------------------
 
 NicoProcessGroup::NicoProcessGroup(const std::vector<int> &_members,
-                                   int ipc_key) {
-  IPC_KEY = ipc_key;
+                                   int ipc_key, int _group_id) {
+  IPC_KEY_BASE = ipc_key;
+  group_id = _group_id;
   members.resize(_members.size());
   std::copy(_members.begin(), _members.end(), members.begin());
   std::sort(members.begin(), members.end());
@@ -137,7 +150,8 @@ NicoProcessGroup::NicoProcessGroup(const std::vector<int> &_members,
   int worldRank = manager->get_world_rank();
   groupRank = -1;
   for (int i = 0; i < memberNum; ++i) {
-    assert(members[i] >= 0 && members[i] < MAX_PROCS);
+    assert(members[i] >= 0 &&
+           members[i] < DeviceContextManager::get()->get_world_size());
     if (members[i] == worldRank) {
       isInGroup = true;
       groupRank = i;
@@ -147,19 +161,32 @@ NicoProcessGroup::NicoProcessGroup(const std::vector<int> &_members,
     return;
   isLeader = (groupRank == 0);
   // check if all members are in the same node
-  isLocal = true;
+  isIntraNode = true;
   for (auto const &rank : members) {
     if (rank / deviceCount != worldRank / deviceCount) {
-      isLocal = false;
+      isIntraNode = false;
       break;
     }
   }
-  if (!isLocal) {
+  if (!isIntraNode)
     return;
-  }
   if (manager->peer_access_enabled()) {
     ipc_init_process_group();
   }
+}
+
+NicoProcessGroup::~NicoProcessGroup() {
+  if (!ipcInitialized)
+    return;
+  assert(shmdt(shmdata) != -1);
+  if (!isLeader)
+    return;
+  for (int i = 0; i < SEM_TOTAL; i++) {
+    assert(semctl(_semid[i], 0, IPC_RMID) != -1);
+  }
+  assert(shmctl(_shmid, IPC_RMID, NULL) != -1);
+  DEBUG("rank[%d]: Leader successfully deleted shmid && semid.",
+        DeviceContextManager::get()->get_world_rank());
 }
 
 // ~ 18us
@@ -168,41 +195,56 @@ void NicoProcessGroup::ipc_init_process_group() {
   // 1. all processes are in the same node
   // 2. peer access is enabled
   // 3. the process is in the group
-  if (ipcInitialized || !isLocal || !isInGroup ||
+  if (ipcInitialized || !isIntraNode || !isInGroup ||
       !DeviceContextManager::get()->peer_access_enabled()) {
     return;
   }
-  shmid = shmget(IPC_KEY, IPC_SHMEM_SEG_SIZE, 0666 | IPC_CREAT);
-  assert(shmid != -1);
+  if (!isLeader) {
+    sleep(1);
+  }
+  _shmid = shmget(IPC_KEY_BASE, IPC_SHMEM_SEG_SIZE, 0666 | IPC_CREAT);
+  assert(_shmid != -1);
+  shmdata = (char *)shmat(_shmid, NULL, 0);
   /*
   ** sem[0] write lock
   ** sem[1] read lock
   ** barrier is performed by all process waiting for a sem to reach 0
   */
-  semid = semget(IPC_KEY, 2, 0666 | IPC_CREAT);
-  assert(semid != -1);
-  shmdata = (char *)shmat(shmid, NULL, 0);
+  int semnum[2] = {2, memberNum};
+  std::vector<short> sarr(32, 0);
+  for (int i = 0; i < SEM_TOTAL; i++) {
+    _semid[i] = semget(IPC_KEY_BASE + i, semnum[i], 0666 | IPC_CREAT);
+    assert(_semid[i] != -1);
+    if (isLeader) {
+      semctl(_semid[i], 0, SETALL, sarr.data());
+    }
+  }
   ipcInitialized = true;
+  DEBUG("rank[%d] IPC is enabled for group[%d]",
+        DeviceContextManager::get()->get_world_rank(), group_id);
 }
 
 struct sembuf write_wait = {0, -1, 0};
 struct sembuf write_exhaust = {0, 0, 0};
 struct sembuf read_wait = {1, -1, 0};
 struct sembuf read_exhaust = {1, 0, 0};
-void *NicoProcessGroup::ipc_allgather(const void *input, size_t bytes) {
+std::vector<char> NicoProcessGroup::ipc_allgather(const void *input,
+                                                  size_t bytes) {
   // gather all `input` data into `recvbuf`
   // shared memory needn't remap to ensure coherence
+  assert(ipcInitialized);
   assert(bytes <= IPC_PROC_SEG_SIZE);
   struct sembuf write_free = {0, (short)memberNum, 0};
   struct sembuf read_free = {1, (short)memberNum, 0};
+  std::vector<char> recvbuf(bytes * memberNum, 0);
 
   // data is placed tightly in shared memory
   int segmentOffset = groupRank * bytes;
+  int semid = _semid[SEM_IPC_ALLGATHER];
   if (isLeader) {
-    // enable write lock
     semop(semid, &write_free, 1);
+    semop(semid, &read_free, 1);
   }
-  // write begin after master has enabled write lock
   if (input != NULL) {
     memcpy(shmdata + segmentOffset, input, bytes);
   } else {
@@ -211,39 +253,108 @@ void *NicoProcessGroup::ipc_allgather(const void *input, size_t bytes) {
   // signal write completion
   semop(semid, &write_wait, 1);
   // wait until all processes have written
-  // read can begin immediately
   semop(semid, &write_exhaust, 1);
-  if (isLeader) {
-    semop(semid, &read_free, 1);
-  }
-  memcpy(recvbuf, shmdata, bytes * memberNum);
+  memcpy(recvbuf.data(), shmdata, bytes * memberNum);
   // signal read completion
   semop(semid, &read_wait, 1);
   // wait until all processes have read
   semop(semid, &read_exhaust, 1);
-  return (void *)recvbuf;
+  return recvbuf;
 }
 
 std::vector<std::vector<void *>> NicoProcessGroup::ipc_allgather_device_pointer(
     const std::vector<void *> &ptrs) {
   int items = ptrs.size();
-  std::vector<cudaIpcMemHandle_t> sendbuf;
-  sendbuf.reserve(items);
-  for (auto devPtr : ptrs) {
-    cudaIpcMemHandle_t handle;
-    cudaIpcGetMemHandle(&handle, devPtr);
-    sendbuf.push_back(handle);
+  cudaIpcMemHandle_t *sendbuf = new cudaIpcMemHandle_t[items];
+  for (int i = 0; i < items; ++i) {
+    CUDA_SAFE_CALL(cudaIpcGetMemHandle(&sendbuf[i], ptrs[i]));
   }
-  cudaIpcMemHandle_t *recvbuf = (cudaIpcMemHandle_t *)ipc_allgather(
-      sendbuf.data(), sizeof(cudaIpcMemHandle_t) * sendbuf.size());
+  auto ret = ipc_allgather(sendbuf, sizeof(cudaIpcMemHandle_t) * items);
+  cudaIpcMemHandle_t *recvbuf =
+      reinterpret_cast<cudaIpcMemHandle_t *>(ret.data());
+  delete[] sendbuf;
   std::vector<std::vector<void *>> result;
   result.resize(memberNum);
   for (int i = 0; i < memberNum; i++) {
     result[i].resize(items);
-    for (int j = 0; j < items; j++) {
-      cudaIpcOpenMemHandle(&result[i][j], recvbuf[i * items + j],
-                           cudaIpcMemLazyEnablePeerAccess);
+    if (i == groupRank) {
+      for (int j = 0; j < items; j++) {
+        result[i][j] = ptrs[j];
+      }
+    } else {
+      for (int j = 0; j < items; j++) {
+        CUDA_SAFE_CALL(cudaIpcOpenMemHandle(&result[i][j],
+                                            recvbuf[i * items + j],
+                                            cudaIpcMemLazyEnablePeerAccess));
+        remoteDevPtrToClose.push(result[i][j]);
+      }
     }
   }
   return result;
 }
+
+void NicoProcessGroup::close_all_mem_handles() {
+  while (!remoteDevPtrToClose.empty()) {
+    auto x = remoteDevPtrToClose.front();
+    CUDA_SAFE_CALL(cudaIpcCloseMemHandle(x));
+    remoteDevPtrToClose.pop();
+  }
+}
+
+#define IS_POW2(x) ((x) == 2 || (x) == 4 || (x) == 8 || (x) == 16)
+#define RING_PREV(x, ring) ((x) == 0 ? (ring)-1 : (x)-1)
+void NicoProcessGroup::allgather_with_peer_access(char *dst, char *src,
+                                                  int64_t numel_dst,
+                                                  int64_t numel_src,
+                                                  bool prof) {
+  if (!isIntraNode || !isInGroup || !IS_POW2(memberNum) || !ipcInitialized) {
+    return;
+  }
+  assert(numel_dst == numel_src * memberNum);
+  auto manager = DeviceContextManager::get();
+  int semid = _semid[SEM_GPU_ALLGATHER];
+  struct sembuf sem_release = {(unsigned short int)groupRank, 1, 0};
+  struct sembuf sem_wait = {(unsigned short int)RING_PREV(groupRank, memberNum),
+                            -1, 0};
+
+  auto start_clk = ch::steady_clock::now();
+  std::vector<void *> ptrs{dst, src};
+  auto peer_ptrs = ipc_allgather_device_pointer(ptrs);
+
+  int sender = RING_PREV(groupRank, memberNum);
+  int recv_offset = RING_PREV(groupRank, memberNum);
+
+  /*
+    for (int it = 1; it < memberNum; ++it) {
+      // wait for previous round
+      if (it == 1) {
+        cudaMemcpyAsync(dst + numel_src * recv_offset, peer_ptrs[sender][1],
+                        numel_src, cudaMemcpyDeviceToDevice,
+    manager->stream(0)); cudaMemcpyAsync(dst + numel_src * groupRank, src,
+    numel_src, cudaMemcpyDeviceToDevice, manager->stream(1)); } else {
+        cudaMemcpyAsync(dst + numel_src * recv_offset,
+                        (char *)peer_ptrs[sender][0] + numel_src * recv_offset,
+                        numel_src, cudaMemcpyDeviceToDevice,
+    manager->stream(0));
+      }
+      manager->sync(0);
+      if (it < memberNum - 1) {
+        semop(semid, &sem_release, 1);
+        recv_offset = RING_PREV(recv_offset, memberNum);
+        semop(semid, &sem_wait, 1);
+      }
+    }
+    manager->sync(1);
+    */
+
+  auto stop_clk = ch::steady_clock::now();
+  if (prof) {
+    ch::duration<double> duration = stop_clk - start_clk;
+    manager->manual_record("allgather_intranode_"
+                           "peeraccess",
+                           duration.count() * 1000);
+  }
+  close_all_mem_handles();
+}
+#undef IS_POW2
+#undef RING_PREV
