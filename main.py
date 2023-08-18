@@ -10,8 +10,8 @@ local_rank, world_size = 0, 0
 device = None
 
 
-WARMUP_ROUND = 20
-PERF_ROUND = 20
+WARMUP_ROUND = 50
+PERF_ROUND = 50
 
 
 def broadcast():
@@ -31,6 +31,7 @@ def broadcast():
     )
 
 
+# deprecate
 def sendrecv(src: int, dst: int):
     if local_rank != src and local_rank != dst:
         return
@@ -68,7 +69,9 @@ def allgather_into_tensor():
         dlwrapper.nico_native.allgather_with_peer_access(dst, ten, 0, True)
     end_tick = time.perf_counter_ns()
     time_in_s = (end_tick - start_tick) / 1e9 / PERF_ROUND
-    print(f"rank {local_rank}: {dst.sum()}, {time_in_s * 1000} ms, {G / time_in_s}GB/s")
+    print(
+        f"rank {local_rank}: {dst.sum()}, {time_in_s * 1000} ms, {bytes / 1e9 / time_in_s}GB/s"
+    )
 
 
 if os.getenv("RANK") != None:

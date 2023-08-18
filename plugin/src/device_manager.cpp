@@ -243,7 +243,6 @@ std::vector<char> NicoProcessGroup::ipc_allgather(const void *input,
   int semid = _semid[SEM_IPC_ALLGATHER];
   if (isLeader) {
     semop(semid, &write_free, 1);
-    semop(semid, &read_free, 1);
   }
   if (input != NULL) {
     memcpy(shmdata + segmentOffset, input, bytes);
@@ -254,6 +253,11 @@ std::vector<char> NicoProcessGroup::ipc_allgather(const void *input,
   semop(semid, &write_wait, 1);
   // wait until all processes have written
   semop(semid, &write_exhaust, 1);
+  if (isLeader) {
+    //! this free must happen after write_exhaust
+    //! otherwise a straggler can stuck at read_exhaust
+    semop(semid, &read_free, 1);
+  }
   memcpy(recvbuf.data(), shmdata, bytes * memberNum);
   // signal read completion
   semop(semid, &read_wait, 1);
@@ -262,35 +266,20 @@ std::vector<char> NicoProcessGroup::ipc_allgather(const void *input,
   return recvbuf;
 }
 
-std::vector<std::vector<void *>> NicoProcessGroup::ipc_allgather_device_pointer(
+std::vector<cudaIpcMemHandle_t> NicoProcessGroup::ipc_allgather_device_pointer(
     const std::vector<void *> &ptrs) {
   int items = ptrs.size();
-  cudaIpcMemHandle_t *sendbuf = new cudaIpcMemHandle_t[items];
+  std::vector<cudaIpcMemHandle_t> sendbuf;
+  sendbuf.resize(items);
   for (int i = 0; i < items; ++i) {
     CUDA_SAFE_CALL(cudaIpcGetMemHandle(&sendbuf[i], ptrs[i]));
   }
-  auto ret = ipc_allgather(sendbuf, sizeof(cudaIpcMemHandle_t) * items);
-  cudaIpcMemHandle_t *recvbuf =
-      reinterpret_cast<cudaIpcMemHandle_t *>(ret.data());
-  delete[] sendbuf;
-  std::vector<std::vector<void *>> result;
-  result.resize(memberNum);
-  for (int i = 0; i < memberNum; i++) {
-    result[i].resize(items);
-    if (i == groupRank) {
-      for (int j = 0; j < items; j++) {
-        result[i][j] = ptrs[j];
-      }
-    } else {
-      for (int j = 0; j < items; j++) {
-        CUDA_SAFE_CALL(cudaIpcOpenMemHandle(&result[i][j],
-                                            recvbuf[i * items + j],
-                                            cudaIpcMemLazyEnablePeerAccess));
-        remoteDevPtrToClose.push(result[i][j]);
-      }
-    }
-  }
-  return result;
+  auto raw_chars =
+      ipc_allgather(sendbuf.data(), sizeof(cudaIpcMemHandle_t) * items);
+  std::vector<cudaIpcMemHandle_t> ret;
+  ret.resize(items * memberNum);
+  memcpy(ret.data(), raw_chars.data(), raw_chars.size());
+  return ret;
 }
 
 void NicoProcessGroup::close_all_mem_handles() {
@@ -302,7 +291,7 @@ void NicoProcessGroup::close_all_mem_handles() {
 }
 
 #define IS_POW2(x) ((x) == 2 || (x) == 4 || (x) == 8 || (x) == 16)
-#define RING_PREV(x, ring) ((x) == 0 ? (ring)-1 : (x)-1)
+#define ALIGN_EXP2(x, y) (((x) >> (y)) << (y))
 void NicoProcessGroup::allgather_with_peer_access(char *dst, char *src,
                                                   int64_t numel_dst,
                                                   int64_t numel_src,
@@ -311,41 +300,48 @@ void NicoProcessGroup::allgather_with_peer_access(char *dst, char *src,
     return;
   }
   assert(numel_dst == numel_src * memberNum);
+  auto start_clk = ch::steady_clock::now();
   auto manager = DeviceContextManager::get();
   int semid = _semid[SEM_GPU_ALLGATHER];
   struct sembuf sem_release = {(unsigned short int)groupRank, 1, 0};
-  struct sembuf sem_wait = {(unsigned short int)RING_PREV(groupRank, memberNum),
-                            -1, 0};
+  struct sembuf sem_wait = {0, -1, 0};
 
-  auto start_clk = ch::steady_clock::now();
   std::vector<void *> ptrs{dst, src};
-  auto peer_ptrs = ipc_allgather_device_pointer(ptrs);
+  auto peer_handles = ipc_allgather_device_pointer(ptrs);
 
-  int sender = RING_PREV(groupRank, memberNum);
-  int recv_offset = RING_PREV(groupRank, memberNum);
-
-  /*
-    for (int it = 1; it < memberNum; ++it) {
-      // wait for previous round
-      if (it == 1) {
-        cudaMemcpyAsync(dst + numel_src * recv_offset, peer_ptrs[sender][1],
-                        numel_src, cudaMemcpyDeviceToDevice,
-    manager->stream(0)); cudaMemcpyAsync(dst + numel_src * groupRank, src,
-    numel_src, cudaMemcpyDeviceToDevice, manager->stream(1)); } else {
-        cudaMemcpyAsync(dst + numel_src * recv_offset,
-                        (char *)peer_ptrs[sender][0] + numel_src * recv_offset,
-                        numel_src, cudaMemcpyDeviceToDevice,
-    manager->stream(0));
-      }
-      manager->sync(0);
-      if (it < memberNum - 1) {
-        semop(semid, &sem_release, 1);
-        recv_offset = RING_PREV(recv_offset, memberNum);
-        semop(semid, &sem_wait, 1);
-      }
+  int stages = 0;
+  void *peer_ptr[4];
+  for (int i = 0; i < 4; ++i) {
+    if ((1 << i) == memberNum) {
+      stages = i;
+      break;
     }
-    manager->sync(1);
-    */
+  }
+
+  int peer = groupRank ^ 1;
+  CUDA_SAFE_CALL(cudaIpcOpenMemHandle(&peer_ptr[0], peer_handles[peer * 2 + 1],
+                                      cudaIpcMemLazyEnablePeerAccess));
+  CUDA_SAFE_CALL(cudaMemcpyAsync(dst + numel_src * peer, peer_ptr[0], numel_src,
+                                 cudaMemcpyDeviceToDevice, manager->stream(0)));
+  CUDA_SAFE_CALL(cudaMemcpyAsync(dst + numel_src * groupRank, src, numel_src,
+                                 cudaMemcpyDeviceToDevice, manager->stream(1)));
+  for (int i = 1; i < stages; ++i) {
+    peer = groupRank ^ (1 << i);
+    CUDA_SAFE_CALL(cudaIpcOpenMemHandle(&peer_ptr[i], peer_handles[peer * 2],
+                                        cudaIpcMemLazyEnablePeerAccess));
+    manager->sync(0);
+    assert(semop(semid, &sem_release, 1) != -1);
+    sem_wait.sem_num = peer;
+    assert(semop(semid, &sem_wait, 1) != -1);
+    size_t offset = ALIGN_EXP2(peer, i) * numel_src;
+    CUDA_SAFE_CALL(cudaMemcpyAsync(dst + offset, (char *)peer_ptr[i] + offset,
+                                   numel_src << i, cudaMemcpyDeviceToDevice,
+                                   manager->stream(0)));
+    CUDA_SAFE_CALL(cudaIpcCloseMemHandle(peer_ptr[i - 1]));
+  }
+  manager->sync(0);
+  CUDA_SAFE_CALL(cudaIpcCloseMemHandle(peer_ptr[stages - 1]));
+  manager->sync(1);
 
   auto stop_clk = ch::steady_clock::now();
   if (prof) {
@@ -354,7 +350,6 @@ void NicoProcessGroup::allgather_with_peer_access(char *dst, char *src,
                            "peeraccess",
                            duration.count() * 1000);
   }
-  close_all_mem_handles();
 }
 #undef IS_POW2
-#undef RING_PREV
+#undef ALIGN_EXP2

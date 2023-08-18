@@ -17,6 +17,7 @@ include_dirs = [
 cxx_flags = [
     "-lrt",  # librt for POSIX shared memory objects
     "-UNDEBUG",
+    "-O3",
 ]
 
 module = cpp_extension.CUDAExtension(

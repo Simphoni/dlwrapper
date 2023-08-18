@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <device_manager.h>
 #include <nico.h>
 
@@ -21,6 +22,7 @@ void _init_nico(c10d::ProcessGroupNCCL &p, bool enable_uva) {
   if (enable_uva) {
     DeviceContextManager::get()->enable_peer_access();
   }
+  atexit(_destroy_nico);
 }
 
 void _destroy_nico() { DeviceContextManager::get()->destroy_existing_pg(); }

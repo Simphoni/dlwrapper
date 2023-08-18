@@ -157,12 +157,16 @@ public:
   bool is_intranode() { return isIntraNode; }
   std::vector<char> ipc_allgather(const void *input, size_t bytes);
 
-  // gathered device pointers from other processes
-  //! NOTE: this will cause memory mapping that needs to be manually undone
-  //! call close_all_mem_handles() to release memory and leave the rest to
-  //! cuda_runtime
-  std::vector<std::vector<void *>>
+  //! NOTE: will not perform cudaIpcOpenMemHandle()
+  // - "cudaIpcMemHandles from each device in a given process may only be opened
+  // by one context per device per other process."
+  //! please DO ensure that opened handles are closed after use
+  std::vector<cudaIpcMemHandle_t>
   ipc_allgather_device_pointer(const std::vector<void *> &ptrs);
+
+  // a fallback method -
+  // if it's inconvenient to ensure handles' closure
+  // enqueue them and call this one to close them all
   void close_all_mem_handles();
 
   void allgather_with_peer_access(char *dst, char *src, int64_t numel_dst,
