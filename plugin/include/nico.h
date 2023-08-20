@@ -28,10 +28,8 @@ void _sendrecv(torch::Tensor t, int src_rnk, int dst_rnk, bool prof);
 
 void _broadcast(torch::Tensor t, bool prof);
 
-void _allgather_into_tensor_doubling(torch::Tensor dst, torch::Tensor src,
-                                     bool prof);
-
-void _allgather_with_peer_access(torch::Tensor dst, torch::Tensor src,
-                                 int idx = 0, bool prof = false);
+void _allgather(torch::Tensor dst, torch::Tensor src, int idx = 0,
+                bool prof = false);
+void _scatter(torch::Tensor tensor, int src_rank, bool prof = false);
 
 void _manager_export_summary();

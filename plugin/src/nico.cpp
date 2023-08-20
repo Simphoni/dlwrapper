@@ -1,6 +1,7 @@
+#include "nico.h"
+#include "device_manager.h"
+#include "mem_handle_manager.h"
 #include <cstdlib>
-#include <device_manager.h>
-#include <nico.h>
 
 std::pair<ncclComm_t, int> ProcessGroupNico::getComm() {
   ncclUniqueId ncclID;
@@ -25,7 +26,10 @@ void _init_nico(c10d::ProcessGroupNCCL &p, bool enable_uva) {
   atexit(_destroy_nico);
 }
 
-void _destroy_nico() { DeviceContextManager::get()->destroy_existing_pg(); }
+void _destroy_nico() {
+  DeviceContextManager::get()->destroy_existing_pg();
+  PeerMemHandleManager::get()->closeAllHandles();
+}
 
 void _sync_stream(int idx) { DeviceContextManager::get()->sync(idx); }
 
@@ -91,74 +95,27 @@ void _broadcast(torch::Tensor t, bool prof) {
   }
 }
 
-#define ALIGN_EXP2(x, y) (((x) >> (y)) << (y))
-
-void _allgather_into_tensor_doubling(torch::Tensor dst, torch::Tensor src,
-                                     bool prof) {
-  assert(DeviceContextManager::get()->get_world_size() == 8);
-  assert(dst.size(0) == src.size(0) * 8);
-  assert(src.is_contiguous());
-  assert(dst.is_contiguous());
-
-  auto manager = DeviceContextManager::get();
-  auto start_clk = ch::steady_clock::now();
-
-  float *recvbuf = dst.data_ptr<float>();
-  float *sendbuf = src.data_ptr<float>();
-  int64_t const len = src.numel();
-  int const rank = manager->get_local_rank();
-  ncclComm_t comm = manager->get_comm_world();
-  // phase 1 is carefully dealt with
-  int peer = rank ^ 1;
-  CUDA_SAFE_CALL(cudaMemcpyAsync(recvbuf + len * rank, sendbuf,
-                                 len * sizeof(float), cudaMemcpyDeviceToDevice,
-                                 manager->stream(1)));
-  // nccl p2p operation is blocking
-  NCCL_SAFE_CALL(ncclGroupStart());
-  NCCL_SAFE_CALL(
-      ncclSend(sendbuf, len, ncclFloat32, peer, comm, manager->stream(0)));
-  NCCL_SAFE_CALL(ncclRecv(recvbuf + len * peer, len, ncclFloat32, peer, comm,
-                          manager->stream(0)));
-  NCCL_SAFE_CALL(ncclGroupEnd());
-  manager->sync(0);
-  manager->sync(1);
-  // phase 2
-  peer = rank ^ 2;
-  NCCL_SAFE_CALL(ncclGroupStart());
-  NCCL_SAFE_CALL(ncclSend(recvbuf + len * ALIGN_EXP2(rank, 1), len * 2,
-                          ncclFloat32, peer, comm, manager->stream(0)));
-  NCCL_SAFE_CALL(ncclRecv(recvbuf + len * ALIGN_EXP2(peer, 1), len * 2,
-                          ncclFloat32, peer, comm, manager->stream(0)));
-  NCCL_SAFE_CALL(ncclGroupEnd());
-  manager->sync(0);
-  // phase 3
-  peer = rank ^ 4;
-  NCCL_SAFE_CALL(ncclGroupStart());
-  NCCL_SAFE_CALL(ncclSend(recvbuf + len * ALIGN_EXP2(rank, 2), len * 4,
-                          ncclFloat32, peer, comm, manager->stream(0)));
-  NCCL_SAFE_CALL(ncclRecv(recvbuf + len * ALIGN_EXP2(peer, 2), len * 4,
-                          ncclFloat32, peer, comm, manager->stream(0)));
-  NCCL_SAFE_CALL(ncclGroupEnd());
-  manager->sync(0);
-
-  auto stop_clk = ch::steady_clock::now();
-  if (prof) {
-    ch::duration<double> duration = stop_clk - start_clk;
-    manager->manual_record("allgather_into_tensor_doubling",
-                           duration.count() * 1000);
-  }
-}
-#undef ALIGN_EXP2
-
-void _allgather_with_peer_access(torch::Tensor dst, torch::Tensor src, int idx,
-                                 bool prof) {
+void _allgather(torch::Tensor dst, torch::Tensor src, int idx, bool prof) {
   assert(dst.is_contiguous());
   assert(src.is_contiguous());
   auto pg = DeviceContextManager::get()->get_process_group(idx);
   float *dstbuf = dst.data_ptr<float>();
   float *srcbuf = src.data_ptr<float>();
-  pg->allgather_with_peer_access((char *)dstbuf, (char *)srcbuf,
-                                 dst.numel() * 4, src.numel() * 4, prof);
+  pg->allgather_cuda_uva((char *)dstbuf, (char *)srcbuf, dst.numel() * 4,
+                         src.numel() * 4, prof);
+}
+
+void _scatter(torch::Tensor tensor, int src_rank, bool prof) {
+  assert(tensor.is_contiguous());
+  auto pg = DeviceContextManager::get()->get_process_group(0);
+  float *buf = tensor.data_ptr<float>();
+  int64_t dst_numel = 0;
+  if (DeviceContextManager::get()->get_local_rank() == src_rank)
+    dst_numel = tensor.numel() / pg->get_member_num();
+  else
+    dst_numel = tensor.numel();
+  dst_numel *= 4;
+  pg->scatter_cuda_uva((char *)buf, src_rank, dst_numel, prof);
 }
 
 void _manager_export_summary() {

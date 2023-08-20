@@ -42,8 +42,7 @@ inline void _nccl_safe_call(ncclResult_t err, const char *file, int line) {
 #endif
 
 #ifdef PLUGIN_ENABLE_INFO
-#define INFO(fmt, ...)                                                         \
-  fprintf(stderr, "%s:%d\t" fmt "\n", __FILE_BRIEF__, __LINE__, __VA_ARGS__)
+#define INFO(fmt, ...) fprintf(stderr, "[INFO]  \t" fmt "\n", __VA_ARGS__)
 #else
 #define INFO(...)
 #endif

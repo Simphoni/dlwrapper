@@ -7,6 +7,7 @@ void test_ipc_allgather();
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "An extensively tailored CUDA library for machine learning.";
+
   // == nico submodule ==
   auto m_nico =
       m.def_submodule("nico_native", "A backend to bypass pytorch NCCL.");
@@ -21,12 +22,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m_nico.def("sendrecv", &_sendrecv, "Nico's sendrecv operation.");
   m_nico.def("broadcast", &_broadcast, "Nico's broadcast operation.");
-  m_nico.def("allgather_into_tensor_doubling", &_allgather_into_tensor_doubling,
-             "Nico's allgather operation w/ recursive doubling.");
 
-  m_nico.def("allgather_with_peer_access", &_allgather_with_peer_access,
-             "Nico's ring all_gather operation.", py::arg("dst"),
-             py::arg("src"), py::arg("idx") = 0, py::arg("prof") = false);
+  m_nico.def("allgather", &_allgather, "Nico's ring all_gather operation.",
+             py::arg("dst"), py::arg("src"), py::arg("idx") = 0,
+             py::arg("prof") = false);
+  m_nico.def("scatter", &_scatter, "Nico's scatter operation.",
+             py::arg("tensor"), py::arg("src_rank"), py::arg("prof") = false);
 
   m_nico.def("export_summary", &_manager_export_summary,
              "Export Nico's internal performance summary.");

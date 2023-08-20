@@ -2,10 +2,6 @@
 #include "common.h"
 #include <algorithm>
 #include <map>
-#include <memory>
-#include <mutex>
-#include <queue>
-#include <semaphore.h>
 #include <string>
 #include <vector>
 
@@ -13,7 +9,6 @@
 #include <sys/sem.h>
 #include <sys/shm.h>
 #include <sys/types.h>
-static std::mutex _mu;
 
 class DeviceContextManager;
 class NicoProcessGroup;
@@ -60,15 +55,7 @@ private:
 
 public:
   // return singleton instance
-  static DeviceContextManager *get() {
-    if (_manager != nullptr) // most cases
-      return _manager;
-    _mu.lock();
-    if (_manager == nullptr)
-      _manager = new DeviceContextManager();
-    _mu.unlock();
-    return _manager;
-  }
+  static DeviceContextManager *get();
 
   void destroy_existing_pg();
 
@@ -106,7 +93,7 @@ public:
   void event_start(std::string s, int idx = 0);
   float event_stop(std::string s, int idx = 0);
   void manual_record(std::string s, float ellapsed_ms);
-  void export_summary() const;
+  void export_summary();
 };
 
 class NicoProcessGroup {
@@ -123,11 +110,11 @@ public:
 
 private:
   int IPC_KEY_BASE;
-  int group_id;
+  int groupId;
 
   enum semUsage : int {
     SEM_IPC_ALLGATHER = 0, // IPC allgather before collective calls
-    SEM_GPU_ALLGATHER = 1, // GPU allgather barriers
+    SEM_GPU_COLL = 1,      // GPU allgather barriers
     SEM_TOTAL,
   };
 
@@ -138,7 +125,6 @@ private:
   // for groups that sit in the same node, IPC can be utilized
   bool ipcInitialized;
   std::vector<int> members;
-  std::queue<void *> remoteDevPtrToClose;
   int memberNum;
 
   // IPC data structures
@@ -155,6 +141,8 @@ private:
 
 public:
   bool is_intranode() { return isIntraNode; }
+  int get_member_num() { return memberNum; }
+
   std::vector<char> ipc_allgather(const void *input, size_t bytes);
 
   //! NOTE: will not perform cudaIpcOpenMemHandle()
@@ -164,11 +152,8 @@ public:
   std::vector<cudaIpcMemHandle_t>
   ipc_allgather_device_pointer(const std::vector<void *> &ptrs);
 
-  // a fallback method -
-  // if it's inconvenient to ensure handles' closure
-  // enqueue them and call this one to close them all
-  void close_all_mem_handles();
-
-  void allgather_with_peer_access(char *dst, char *src, int64_t numel_dst,
-                                  int64_t numel_src, bool prof = false);
+  void allgather_cuda_uva(char *dst, char *src, int64_t numel_dst,
+                          int64_t numel_src, bool prof = false);
+  void scatter_cuda_uva(char *data, int src_rank, int64_t numel_dst,
+                        bool prof = false);
 };

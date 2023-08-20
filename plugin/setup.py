@@ -9,7 +9,9 @@ sources = [
     "src/nico.cpp",
     "src/export.cpp",
     "src/device_manager.cpp",
+    "src/comm_ops.cpp",
     "src/unit_test.cpp",
+    "src/mem_handle_manager.cpp",
 ]
 include_dirs = [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "include"),
@@ -30,6 +32,6 @@ module = cpp_extension.CUDAExtension(
 setup(
     name="DLWrapper",
     ext_modules=[module],
-    packages=["nico"],
+    # packages=["nico"],
     cmdclass={"build_ext": cpp_extension.BuildExtension},
 )

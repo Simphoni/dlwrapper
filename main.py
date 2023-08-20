@@ -3,8 +3,7 @@ import sys
 import time
 import torch  # torch must be imported ahead of dlwrapper
 import torch.distributed as dist
-import dlwrapper
-import nico
+from dlwrapper import nico_native
 
 local_rank, world_size = 0, 0
 device = None
@@ -18,11 +17,11 @@ def broadcast():
     t = torch.randn(1024 * 1024 * 1024, device=device)  # 4G
     print(f"rank {local_rank}: {t.sum().item()}")
     for _ in range(WARMUP_ROUND):
-        dlwrapper.nico_native.broadcast(t, False)
+        nico_native.broadcast(t, False)
 
     start_tick = time.perf_counter_ns()
     for _ in range(PERF_ROUND):
-        dlwrapper.nico_native.broadcast(t, True)
+        nico_native.broadcast(t, True)
     end_tick = time.perf_counter_ns()
 
     time_in_s = (end_tick - start_tick) / 1e9 / PERF_ROUND
@@ -38,11 +37,11 @@ def sendrecv(src: int, dst: int):
     t = torch.randn(1024 * 1024 * 1024, dtype=torch.float32, device=device)
 
     for _ in range(WARMUP_ROUND):
-        dlwrapper.nico_native.sendrecv(t, src, dst, False)
+        nico_native.sendrecv(t, src, dst, False)
 
     start_tick = time.perf_counter_ns()
     for _ in range(PERF_ROUND):
-        dlwrapper.nico_native.sendrecv(t, src, dst, True)
+        nico_native.sendrecv(t, src, dst, True)
     end_tick = time.perf_counter_ns()
 
     time_in_s = (end_tick - start_tick) / 1e9 / PERF_ROUND
@@ -51,9 +50,8 @@ def sendrecv(src: int, dst: int):
     )
 
 
-def allgather_into_tensor():
-    G = 4
-    bytes = G * 1024 * 1024 * 1024
+def allgather_into_tensor(G):
+    bytes = int(G * 1024 * 1024 * 1024)
     ten: torch.Tensor = torch.randn(
         (1, bytes // 32), dtype=torch.float32, device=device
     )
@@ -62,15 +60,50 @@ def allgather_into_tensor():
     )
 
     for i in range(WARMUP_ROUND):
-        dlwrapper.nico_native.allgather_with_peer_access(dst, ten, 0, False)
+        nico_native.allgather(dst, ten, 0, False)
 
     start_tick = time.perf_counter_ns()
     for _ in range(PERF_ROUND):
-        dlwrapper.nico_native.allgather_with_peer_access(dst, ten, 0, True)
+        nico_native.allgather(dst, ten, 0, True)
     end_tick = time.perf_counter_ns()
     time_in_s = (end_tick - start_tick) / 1e9 / PERF_ROUND
     print(
         f"rank {local_rank}: {dst.sum()}, {time_in_s * 1000} ms, {bytes / 1e9 / time_in_s}GB/s"
+    )
+    del ten
+    del dst
+
+
+def scatter(G):
+    bytes = int(G * 1024 * 1024 * 1024)
+    ten = None
+    if local_rank == 0:
+        ten = torch.randn((8, bytes // 32), dtype=torch.float32, device=device)
+    else:
+        ten = torch.empty((bytes // 32), dtype=torch.float32, device=device)
+
+    for i in range(WARMUP_ROUND):
+        nico_native.scatter(ten, 0, False)
+
+    start_tick = time.perf_counter_ns()
+    for _ in range(PERF_ROUND):
+        nico_native.scatter(ten, 0, True)
+    end_tick = time.perf_counter_ns()
+    time_in_s = (end_tick - start_tick) / 1e9 / PERF_ROUND
+    print(
+        f"rank {local_rank}: {ten.sum()}, {time_in_s * 1000} ms, {bytes / 1e9 / time_in_s}GB/s"
+    )
+    if local_rank == 0:
+        for i in range(8):
+            print(f"src={i}: {ten[i].sum()}")
+
+    del ten
+
+
+def init_nico(enable_uva: bool):
+    nico_native.init_nico(
+        pg=dist.distributed_c10d._get_default_group(),
+        enable_uva=enable_uva,
     )
 
 
@@ -84,25 +117,20 @@ if os.getenv("RANK") != None:
         backend="nccl", init_method="env://", world_size=world_size, rank=local_rank
     )
     device = torch.device(f"cuda:{local_rank}")
+    node = dist.new_group(list(range(8)))
 
-    nico.init_nico(True)
-    if True:
-        ROUNDS = 500
-        for i in range(ROUNDS):
-            dlwrapper.nico_native.testing()
-        start_tick = time.perf_counter_ns()
-        for i in range(ROUNDS):
-            dlwrapper.nico_native.testing()
-        end_tick = time.perf_counter_ns()
-        time_in_s = (end_tick - start_tick) / 1e9
-        print(
-            f"rank {local_rank}: operation ave cost {time_in_s * 1000 / ROUNDS} ms",
-            flush=True,
-        )
-    allgather_into_tensor()
+    init_nico(True)
+    test_func = [scatter]
+    for G in [0.5, 1, 2, 4, 8]:
+        for f in test_func:
+            f(G)
+            dist.barrier(node)
+            if local_rank == 0:
+                print("--------------------")
+            dist.barrier(node)
 else:
     # local work
     a = torch.randn(20, 30, dtype=float)
-    dlwrapper.nico_native.testing()
+    nico_native.testing()
 
-dlwrapper.nico_native.export_summary()
+nico_native.export_summary()

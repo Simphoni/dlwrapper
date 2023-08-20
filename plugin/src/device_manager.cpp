@@ -1,16 +1,32 @@
 #include "device_manager.h"
+#include "mem_handle_manager.h"
 #include <chrono>
+#include <mutex>
 #include <unistd.h>
 namespace ch = std::chrono;
 
+static std::mutex _mu; // for singleton instance
 DeviceContextManager *DeviceContextManager::_manager = nullptr;
 
 void DeviceContextManager::destroy_existing_pg() {
-  DEBUG("rank[%d]: destroying all existing process groups.", worldRank);
+  _mu.lock();
+  INFO("rank[%d]: destroying process groups.", worldRank);
   for (auto pg : procGroups) {
     delete pg;
   }
+  INFO("rank[%d]: done.", worldRank);
   procGroups.clear();
+  _mu.unlock();
+}
+
+DeviceContextManager *DeviceContextManager::get() {
+  if (_manager != nullptr) // most cases
+    return _manager;
+  _mu.lock();
+  if (_manager == nullptr)
+    _manager = new DeviceContextManager();
+  _mu.unlock();
+  return _manager;
 }
 
 void DeviceContextManager::set_comm_world(std::pair<ncclComm_t, int> _comm) {
@@ -120,7 +136,7 @@ void DeviceContextManager::manual_record(std::string s, float ellapsed_ms) {
   _mu.unlock();
 }
 
-void DeviceContextManager::export_summary() const {
+void DeviceContextManager::export_summary() {
   _mu.lock();
   INFO("rank[%d]: time summary for %ld events: (item / total_ms / "
        "evoke_num)",
@@ -129,6 +145,7 @@ void DeviceContextManager::export_summary() const {
     INFO("rank[%d]: %s\t%f\t%d", localRank, kv.first.data(), kv.second.first,
          kv.second.second);
   }
+  _cumtime.clear();
   _mu.unlock();
 }
 
@@ -137,7 +154,7 @@ void DeviceContextManager::export_summary() const {
 NicoProcessGroup::NicoProcessGroup(const std::vector<int> &_members,
                                    int ipc_key, int _group_id) {
   IPC_KEY_BASE = ipc_key;
-  group_id = _group_id;
+  groupId = _group_id;
   members.resize(_members.size());
   std::copy(_members.begin(), _members.end(), members.begin());
   std::sort(members.begin(), members.end());
@@ -178,15 +195,24 @@ NicoProcessGroup::NicoProcessGroup(const std::vector<int> &_members,
 NicoProcessGroup::~NicoProcessGroup() {
   if (!ipcInitialized)
     return;
-  assert(shmdt(shmdata) != -1);
+  try {
+    shmdt(shmdata);
+  } catch (...) { // do nothing
+  }
   if (!isLeader)
     return;
   for (int i = 0; i < SEM_TOTAL; i++) {
-    assert(semctl(_semid[i], 0, IPC_RMID) != -1);
+    try {
+      semctl(_semid[i], 0, IPC_RMID);
+    } catch (...) { // do nothing
+    }
   }
-  assert(shmctl(_shmid, IPC_RMID, NULL) != -1);
-  DEBUG("rank[%d]: Leader successfully deleted shmid && semid.",
-        DeviceContextManager::get()->get_world_rank());
+  try {
+    shmctl(_shmid, IPC_RMID, NULL);
+  } catch (...) { // do nothing
+  }
+  DEBUG("rank[%d]-group[%d]: Leader successfully deleted shmid && semid.",
+        DeviceContextManager::get()->get_world_rank(), groupId);
 }
 
 // ~ 18us
@@ -221,7 +247,7 @@ void NicoProcessGroup::ipc_init_process_group() {
   }
   ipcInitialized = true;
   DEBUG("rank[%d] IPC is enabled for group[%d]",
-        DeviceContextManager::get()->get_world_rank(), group_id);
+        DeviceContextManager::get()->get_world_rank(), groupId);
 }
 
 struct sembuf write_wait = {0, -1, 0};
@@ -272,7 +298,8 @@ std::vector<cudaIpcMemHandle_t> NicoProcessGroup::ipc_allgather_device_pointer(
   std::vector<cudaIpcMemHandle_t> sendbuf;
   sendbuf.resize(items);
   for (int i = 0; i < items; ++i) {
-    CUDA_SAFE_CALL(cudaIpcGetMemHandle(&sendbuf[i], ptrs[i]));
+    if (ptrs[i] != nullptr)
+      CUDA_SAFE_CALL(cudaIpcGetMemHandle(&sendbuf[i], ptrs[i]));
   }
   auto raw_chars =
       ipc_allgather(sendbuf.data(), sizeof(cudaIpcMemHandle_t) * items);
@@ -281,75 +308,3 @@ std::vector<cudaIpcMemHandle_t> NicoProcessGroup::ipc_allgather_device_pointer(
   memcpy(ret.data(), raw_chars.data(), raw_chars.size());
   return ret;
 }
-
-void NicoProcessGroup::close_all_mem_handles() {
-  while (!remoteDevPtrToClose.empty()) {
-    auto x = remoteDevPtrToClose.front();
-    CUDA_SAFE_CALL(cudaIpcCloseMemHandle(x));
-    remoteDevPtrToClose.pop();
-  }
-}
-
-#define IS_POW2(x) ((x) == 2 || (x) == 4 || (x) == 8 || (x) == 16)
-#define ALIGN_EXP2(x, y) (((x) >> (y)) << (y))
-void NicoProcessGroup::allgather_with_peer_access(char *dst, char *src,
-                                                  int64_t numel_dst,
-                                                  int64_t numel_src,
-                                                  bool prof) {
-  if (!isIntraNode || !isInGroup || !IS_POW2(memberNum) || !ipcInitialized) {
-    return;
-  }
-  assert(numel_dst == numel_src * memberNum);
-  auto start_clk = ch::steady_clock::now();
-  auto manager = DeviceContextManager::get();
-  int semid = _semid[SEM_GPU_ALLGATHER];
-  struct sembuf sem_release = {(unsigned short int)groupRank, 1, 0};
-  struct sembuf sem_wait = {0, -1, 0};
-
-  std::vector<void *> ptrs{dst, src};
-  auto peer_handles = ipc_allgather_device_pointer(ptrs);
-
-  int stages = 0;
-  void *peer_ptr[4];
-  for (int i = 0; i < 4; ++i) {
-    if ((1 << i) == memberNum) {
-      stages = i;
-      break;
-    }
-  }
-
-  int peer = groupRank ^ 1;
-  CUDA_SAFE_CALL(cudaIpcOpenMemHandle(&peer_ptr[0], peer_handles[peer * 2 + 1],
-                                      cudaIpcMemLazyEnablePeerAccess));
-  CUDA_SAFE_CALL(cudaMemcpyAsync(dst + numel_src * peer, peer_ptr[0], numel_src,
-                                 cudaMemcpyDeviceToDevice, manager->stream(0)));
-  CUDA_SAFE_CALL(cudaMemcpyAsync(dst + numel_src * groupRank, src, numel_src,
-                                 cudaMemcpyDeviceToDevice, manager->stream(1)));
-  for (int i = 1; i < stages; ++i) {
-    peer = groupRank ^ (1 << i);
-    CUDA_SAFE_CALL(cudaIpcOpenMemHandle(&peer_ptr[i], peer_handles[peer * 2],
-                                        cudaIpcMemLazyEnablePeerAccess));
-    manager->sync(0);
-    assert(semop(semid, &sem_release, 1) != -1);
-    sem_wait.sem_num = peer;
-    assert(semop(semid, &sem_wait, 1) != -1);
-    size_t offset = ALIGN_EXP2(peer, i) * numel_src;
-    CUDA_SAFE_CALL(cudaMemcpyAsync(dst + offset, (char *)peer_ptr[i] + offset,
-                                   numel_src << i, cudaMemcpyDeviceToDevice,
-                                   manager->stream(0)));
-    CUDA_SAFE_CALL(cudaIpcCloseMemHandle(peer_ptr[i - 1]));
-  }
-  manager->sync(0);
-  CUDA_SAFE_CALL(cudaIpcCloseMemHandle(peer_ptr[stages - 1]));
-  manager->sync(1);
-
-  auto stop_clk = ch::steady_clock::now();
-  if (prof) {
-    ch::duration<double> duration = stop_clk - start_clk;
-    manager->manual_record("allgather_intranode_"
-                           "peeraccess",
-                           duration.count() * 1000);
-  }
-}
-#undef IS_POW2
-#undef ALIGN_EXP2
