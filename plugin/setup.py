@@ -1,7 +1,5 @@
 # file name: setup.py
-# install cuda_plugins as
 import os
-import torch
 from setuptools import setup
 from torch.utils import cpp_extension
 
@@ -31,6 +29,7 @@ module = cpp_extension.CUDAExtension(
 
 setup(
     name="DLWrapper",
+    version="0.0.1",
     ext_modules=[module],
     # packages=["nico"],
     cmdclass={"build_ext": cpp_extension.BuildExtension},
