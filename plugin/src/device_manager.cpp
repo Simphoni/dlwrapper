@@ -50,8 +50,7 @@ void DeviceContextManager::set_comm_world(std::pair<ncclComm_t, int> _comm) {
     members.push_back(i + nodeRank * deviceCount);
   }
   // initialize a default process group
-  procGroups.emplace_back(
-      new NicoProcessGroup(members, IPC_KEY_MASTER + 0 * IPC_KEY_PER_GROUP, 0));
+  procGroups.emplace_back(new NicoProcessGroup(members, IPC_KEY_MASTER + 0 * IPC_KEY_PER_GROUP, 0));
   _mu.unlock();
 }
 
@@ -75,13 +74,12 @@ void DeviceContextManager::enable_peer_access() {
   _mu.unlock();
 }
 
-int DeviceContextManager::create_process_group(
-    const std::vector<int> &members) {
+int DeviceContextManager::create_process_group(const std::vector<int> &members) {
   _mu.lock();
   assert(initialized);
   int ret = procGroups.size();
-  procGroups.emplace_back(new NicoProcessGroup(
-      members, IPC_KEY_MASTER + ret * IPC_KEY_PER_GROUP, ret));
+  procGroups.emplace_back(
+      new NicoProcessGroup(members, IPC_KEY_MASTER + ret * IPC_KEY_PER_GROUP, ret));
   if (peerAccessEnabled) {
     procGroups[ret]->ipc_init_process_group();
   }
@@ -142,8 +140,7 @@ void DeviceContextManager::export_summary() {
        "evoke_num)",
        localRank, _cumtime.size());
   for (auto const kv : _cumtime) {
-    INFO("rank[%d]: %s\t%f\t%d", localRank, kv.first.data(), kv.second.first,
-         kv.second.second);
+    INFO("rank[%d]: %s\t%f\t%d", localRank, kv.first.data(), kv.second.first, kv.second.second);
   }
   _cumtime.clear();
   _mu.unlock();
@@ -151,8 +148,7 @@ void DeviceContextManager::export_summary() {
 
 // -------------------------- NicoProcessGroup --------------------------
 
-NicoProcessGroup::NicoProcessGroup(const std::vector<int> &_members,
-                                   int ipc_key, int _group_id) {
+NicoProcessGroup::NicoProcessGroup(const std::vector<int> &_members, int ipc_key, int _group_id) {
   IPC_KEY_BASE = ipc_key;
   groupId = _group_id;
   members.resize(_members.size());
@@ -167,8 +163,7 @@ NicoProcessGroup::NicoProcessGroup(const std::vector<int> &_members,
   int worldRank = manager->get_world_rank();
   groupRank = -1;
   for (int i = 0; i < memberNum; ++i) {
-    assert(members[i] >= 0 &&
-           members[i] < DeviceContextManager::get()->get_world_size());
+    assert(members[i] >= 0 && members[i] < DeviceContextManager::get()->get_world_size());
     if (members[i] == worldRank) {
       isInGroup = true;
       groupRank = i;
@@ -246,16 +241,15 @@ void NicoProcessGroup::ipc_init_process_group() {
     }
   }
   ipcInitialized = true;
-  DEBUG("rank[%d] IPC is enabled for group[%d]",
-        DeviceContextManager::get()->get_world_rank(), groupId);
+  DEBUG("rank[%d] IPC is enabled for group[%d]", DeviceContextManager::get()->get_world_rank(),
+        groupId);
 }
 
 struct sembuf write_wait = {0, -1, 0};
 struct sembuf write_exhaust = {0, 0, 0};
 struct sembuf read_wait = {1, -1, 0};
 struct sembuf read_exhaust = {1, 0, 0};
-std::vector<char> NicoProcessGroup::ipc_allgather(const void *input,
-                                                  size_t bytes) {
+std::vector<char> NicoProcessGroup::ipc_allgather(const void *input, size_t bytes) {
   // gather all `input` data into `recvbuf`
   // shared memory needn't remap to ensure coherence
   assert(ipcInitialized);
@@ -292,8 +286,8 @@ std::vector<char> NicoProcessGroup::ipc_allgather(const void *input,
   return recvbuf;
 }
 
-std::vector<cudaIpcMemHandle_t> NicoProcessGroup::ipc_allgather_device_pointer(
-    const std::vector<void *> &ptrs) {
+std::vector<cudaIpcMemHandle_t>
+NicoProcessGroup::ipc_allgather_device_pointer(const std::vector<void *> &ptrs) {
   int items = ptrs.size();
   std::vector<cudaIpcMemHandle_t> sendbuf;
   sendbuf.resize(items);
@@ -301,8 +295,7 @@ std::vector<cudaIpcMemHandle_t> NicoProcessGroup::ipc_allgather_device_pointer(
     if (ptrs[i] != nullptr)
       CUDA_SAFE_CALL(cudaIpcGetMemHandle(&sendbuf[i], ptrs[i]));
   }
-  auto raw_chars =
-      ipc_allgather(sendbuf.data(), sizeof(cudaIpcMemHandle_t) * items);
+  auto raw_chars = ipc_allgather(sendbuf.data(), sizeof(cudaIpcMemHandle_t) * items);
   std::vector<cudaIpcMemHandle_t> ret;
   ret.resize(items * memberNum);
   memcpy(ret.data(), raw_chars.data(), raw_chars.size());

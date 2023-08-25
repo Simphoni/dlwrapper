@@ -6,9 +6,8 @@ namespace ch = std::chrono;
 
 #define IS_POW2(x) ((x) == 2 || (x) == 4 || (x) == 8 || (x) == 16)
 #define ALIGN_EXP2(x, y) (((x) >> (y)) << (y))
-void NicoProcessGroup::allgather_cuda_uva(char *dst, char *src,
-                                          int64_t numel_dst, int64_t numel_src,
-                                          bool prof) {
+void NicoProcessGroup::allgather_cuda_uva(char *dst, char *src, int64_t numel_dst,
+                                          int64_t numel_src, bool prof) {
   if (!isIntraNode || !isInGroup || !IS_POW2(memberNum) || !ipcInitialized) {
     return;
   }
@@ -46,9 +45,8 @@ void NicoProcessGroup::allgather_cuda_uva(char *dst, char *src,
     sem_wait.sem_num = peer;
     assert(semop(semid, &sem_wait, 1) != -1);
     size_t offset = ALIGN_EXP2(peer, i) * numel_src;
-    CUDA_SAFE_CALL(cudaMemcpyAsync(dst + offset, (char *)peer_ptr + offset,
-                                   numel_src << i, cudaMemcpyDeviceToDevice,
-                                   manager->stream(0)));
+    CUDA_SAFE_CALL(cudaMemcpyAsync(dst + offset, (char *)peer_ptr + offset, numel_src << i,
+                                   cudaMemcpyDeviceToDevice, manager->stream(0)));
   }
   manager->sync(0);
   manager->sync(1);
@@ -61,8 +59,7 @@ void NicoProcessGroup::allgather_cuda_uva(char *dst, char *src,
 }
 #undef ALIGN_EXP2
 
-void NicoProcessGroup::scatter_cuda_uva(char *data, int src_rank,
-                                        int64_t numel_dst, bool prof) {
+void NicoProcessGroup::scatter_cuda_uva(char *data, int src_rank, int64_t numel_dst, bool prof) {
   if (!isIntraNode || !isInGroup || !ipcInitialized) {
     return;
   }
@@ -77,12 +74,10 @@ void NicoProcessGroup::scatter_cuda_uva(char *data, int src_rank,
   auto peer_handles = ipc_allgather_device_pointer(ptrs);
 
   if (groupRank != src_rank) {
-    void *src_ptr =
-        PeerMemHandleManager::get()->openHandle(peer_handles[src_rank]);
+    void *src_ptr = PeerMemHandleManager::get()->openHandle(peer_handles[src_rank]);
     size_t offset = groupRank * numel_dst;
     CUDA_SAFE_CALL(cudaMemcpyAsync(data, (char *)src_ptr + offset, numel_dst,
-                                   cudaMemcpyDeviceToDevice,
-                                   manager->stream(0)));
+                                   cudaMemcpyDeviceToDevice, manager->stream(0)));
     manager->sync(0);
   }
 

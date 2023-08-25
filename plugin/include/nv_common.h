@@ -1,12 +1,11 @@
-// common.h
+// nv_common.h
 // includes macros of cpp extension and nvidia headers
 // DOES NOT include torch headers
 #pragma once
 
 #define PLUGIN_ENABLE_NCCL
-#define PLUGIN_ENABLE_INFO
-#define PLUGIN_ENABLE_DEBUG
 
+#include "misc.h"
 #include <cassert>
 #include <cstdio>
 #include <cuda.h>
@@ -14,14 +13,10 @@
 #include <iostream>
 #include <string>
 
-/* /cpfs01/user/xingjingze/dlwrapper/plugin/include/device_manager.h */
-#define __FILE_BRIEF__ std::string(__FILE__).substr(41).data()
-
 #define CUDA_SAFE_CALL(__fn__) _cuda_safe_call(__fn__, __FILE_BRIEF__, __LINE__)
 inline void _cuda_safe_call(cudaError_t err, const char *file, int line) {
   if (err != cudaSuccess) {
-    fprintf(stderr, "CUDA Error at %s:%d message %s\n", file, line,
-            cudaGetErrorName(err));
+    fprintf(stderr, "CUDA Error at %s:%d message %s\n", file, line, cudaGetErrorName(err));
     exit(-1);
   }
 }
@@ -39,17 +34,4 @@ inline void _nccl_safe_call(ncclResult_t err, const char *file, int line) {
   }
 }
 
-#endif
-
-#ifdef PLUGIN_ENABLE_INFO
-#define INFO(fmt, ...) fprintf(stderr, "[INFO]  \t" fmt "\n", __VA_ARGS__)
-#else
-#define INFO(...)
-#endif
-
-#ifdef PLUGIN_ENABLE_DEBUG
-#define DEBUG(fmt, ...)                                                        \
-  fprintf(stderr, "%s:%d\t" fmt "\n", __FILE_BRIEF__, __LINE__, __VA_ARGS__)
-#else
-#define DEBUG(...)
 #endif

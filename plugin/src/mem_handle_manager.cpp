@@ -1,6 +1,6 @@
 #include "mem_handle_manager.h"
-#include "common.h"
 #include "device_manager.h"
+#include "nv_common.h"
 #include <mutex>
 #include <unordered_map>
 
@@ -22,15 +22,13 @@ void *PeerMemHandleManager::openHandle(cudaIpcMemHandle_t key) {
   if (it != openedHandles.end())
     return it->second;
   void *devPtr;
-  CUDA_SAFE_CALL(
-      cudaIpcOpenMemHandle(&devPtr, key, cudaIpcMemLazyEnablePeerAccess));
+  CUDA_SAFE_CALL(cudaIpcOpenMemHandle(&devPtr, key, cudaIpcMemLazyEnablePeerAccess));
   openedHandles[key] = devPtr;
   return devPtr;
 }
 
 void PeerMemHandleManager::closeAllHandles() {
-  INFO("rank[%d]: closing all handles.",
-       DeviceContextManager::get()->get_world_rank());
+  INFO("rank[%d]: closing all handles.", DeviceContextManager::get()->get_world_rank());
   for (auto it = openedHandles.begin(); it != openedHandles.end(); it++) {
     // Calling cudaFree on an exported memory region before calling
     // `cudaIpcCloseMemHandle` in the importing context will result in undefined

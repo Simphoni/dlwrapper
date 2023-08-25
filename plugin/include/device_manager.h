@@ -1,5 +1,5 @@
 #pragma once
-#include "common.h"
+#include "nv_common.h"
 #include <algorithm>
 #include <map>
 #include <string>
@@ -105,8 +105,7 @@ public:
   static constexpr int MAX_PROCS = 8;
   static constexpr size_t IPC_SHMEM_SEG_SIZE = 1ul << 12; //! do not change
   static constexpr size_t IPC_PROC_SEG_SIZE = IPC_SHMEM_SEG_SIZE / MAX_PROCS;
-  static constexpr int MAX_CUDA_MEM_HANDLES =
-      IPC_PROC_SEG_SIZE / CUDA_IPC_HANDLE_SIZE;
+  static constexpr int MAX_CUDA_MEM_HANDLES = IPC_PROC_SEG_SIZE / CUDA_IPC_HANDLE_SIZE;
 
 private:
   int IPC_KEY_BASE;
@@ -134,8 +133,7 @@ private:
 
   // nico's process groups are managed by DeviceContextManager
   friend class DeviceContextManager;
-  NicoProcessGroup(const std::vector<int> &_members, int ipc_key,
-                   int _group_id);
+  NicoProcessGroup(const std::vector<int> &_members, int ipc_key, int _group_id);
   void ipc_init_process_group();
   ~NicoProcessGroup();
 
@@ -149,11 +147,9 @@ public:
   // - "cudaIpcMemHandles from each device in a given process may only be opened
   // by one context per device per other process."
   //! please DO ensure that opened handles are closed after use
-  std::vector<cudaIpcMemHandle_t>
-  ipc_allgather_device_pointer(const std::vector<void *> &ptrs);
+  std::vector<cudaIpcMemHandle_t> ipc_allgather_device_pointer(const std::vector<void *> &ptrs);
 
-  void allgather_cuda_uva(char *dst, char *src, int64_t numel_dst,
-                          int64_t numel_src, bool prof = false);
-  void scatter_cuda_uva(char *data, int src_rank, int64_t numel_dst,
-                        bool prof = false);
+  void allgather_cuda_uva(char *dst, char *src, int64_t numel_dst, int64_t numel_src,
+                          bool prof = false);
+  void scatter_cuda_uva(char *data, int src_rank, int64_t numel_dst, bool prof = false);
 };

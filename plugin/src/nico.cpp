@@ -33,13 +33,12 @@ void _destroy_nico() {
 
 void _sync_stream(int idx) { DeviceContextManager::get()->sync(idx); }
 
-void _memcpy_peer(torch::Tensor dst, torch::Tensor src, int peer, int bytes,
-                  bool prof) {
+void _memcpy_peer(torch::Tensor dst, torch::Tensor src, int peer, int bytes, bool prof) {
   auto manager = DeviceContextManager::get();
   if (prof)
     manager->event_start("p2p comm");
-  cudaMemcpyPeerAsync(dst.data_ptr<float>(), manager->get_local_rank(),
-                      src.data_ptr<float>(), peer, bytes, manager->stream(0));
+  cudaMemcpyPeerAsync(dst.data_ptr<float>(), manager->get_local_rank(), src.data_ptr<float>(), peer,
+                      bytes, manager->stream(0));
   if (prof)
     manager->event_stop("p2p comm");
   else
@@ -60,12 +59,10 @@ void _sendrecv(torch::Tensor t, int src_rnk, int dst_rnk, bool prof) {
     manager->event_start(std::string("sendrecv"));
   }
   if (rank == src_rnk) {
-    ncclSend(buf, t.numel(), ncclFloat32, dst_rnk, comm,
-             manager->stream(stream));
+    ncclSend(buf, t.numel(), ncclFloat32, dst_rnk, comm, manager->stream(stream));
   }
   if (rank == dst_rnk) {
-    ncclRecv(buf, t.numel(), ncclFloat32, src_rnk, comm,
-             manager->stream(stream));
+    ncclRecv(buf, t.numel(), ncclFloat32, src_rnk, comm, manager->stream(stream));
   }
   if (prof) {
     manager->event_stop(std::string("sendrecv"));
@@ -85,9 +82,8 @@ void _broadcast(torch::Tensor t, bool prof) {
   if (prof) {
     manager->event_start(std::string("broadcast"));
   }
-  NCCL_SAFE_CALL(ncclBroadcast(t.data_ptr<float>(), t.data_ptr<float>(),
-                               t.numel(), ncclFloat32, 0, comm,
-                               manager->stream(0)));
+  NCCL_SAFE_CALL(ncclBroadcast(t.data_ptr<float>(), t.data_ptr<float>(), t.numel(), ncclFloat32, 0,
+                               comm, manager->stream(0)));
   if (prof) {
     manager->event_stop(std::string("broadcast"));
   } else {
@@ -101,8 +97,7 @@ void _allgather(torch::Tensor dst, torch::Tensor src, int idx, bool prof) {
   auto pg = DeviceContextManager::get()->get_process_group(idx);
   float *dstbuf = dst.data_ptr<float>();
   float *srcbuf = src.data_ptr<float>();
-  pg->allgather_cuda_uva((char *)dstbuf, (char *)srcbuf, dst.numel() * 4,
-                         src.numel() * 4, prof);
+  pg->allgather_cuda_uva((char *)dstbuf, (char *)srcbuf, dst.numel() * 4, src.numel() * 4, prof);
 }
 
 void _scatter(torch::Tensor tensor, int src_rank, bool prof) {
@@ -118,6 +113,4 @@ void _scatter(torch::Tensor tensor, int src_rank, bool prof) {
   pg->scatter_cuda_uva((char *)buf, src_rank, dst_numel, prof);
 }
 
-void _manager_export_summary() {
-  DeviceContextManager::get()->export_summary();
-}
+void _manager_export_summary() { DeviceContextManager::get()->export_summary(); }

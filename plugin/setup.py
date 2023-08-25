@@ -3,6 +3,8 @@ import os
 from setuptools import setup
 from torch.utils import cpp_extension
 
+extdir = os.path.dirname(os.path.abspath(__file__))
+
 sources = [
     "src/nico.cpp",
     "src/export.cpp",
@@ -10,17 +12,18 @@ sources = [
     "src/comm_ops.cpp",
     "src/unit_test.cpp",
     "src/mem_handle_manager.cpp",
+    "src/lazy_unpickler.cpp",
 ]
 include_dirs = [
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "include"),
+    os.path.join(extdir, "include"),
 ]
 cxx_flags = [
     "-lrt",  # librt for POSIX shared memory objects
     "-UNDEBUG",
-    "-O3",
+    "-std=c++17",
 ]
 
-module = cpp_extension.CUDAExtension(
+dlwrapper = cpp_extension.CUDAExtension(
     name="dlwrapper",
     sources=sources,
     include_dirs=include_dirs,
@@ -30,7 +33,10 @@ module = cpp_extension.CUDAExtension(
 setup(
     name="DLWrapper",
     version="0.0.1",
-    ext_modules=[module],
+    ext_modules=[dlwrapper],
     # packages=["nico"],
     cmdclass={"build_ext": cpp_extension.BuildExtension},
+)
+lib_file = os.path.join(
+    extdir, "build/lib.linux-x86_64-cpython-39/dlwrapper.cpython-39-x86_64-linux-gnu.so"
 )

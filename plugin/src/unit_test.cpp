@@ -1,6 +1,6 @@
-#include "common.h"
 #include "device_manager.h"
 #include "nico.h"
+#include "nv_common.h"
 
 void test_ipc_allgather() {
   static int callnum = 0;
