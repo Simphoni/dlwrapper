@@ -3,6 +3,7 @@
 #define PLUGIN_ENABLE_DEBUG
 
 #include <cstdlib>
+#include <stdexcept>
 
 /* /cpfs01/user/xingjingze/dlwrapper/plugin/include/device_manager.h */
 #define __FILE_BRIEF__ std::string(__FILE__).substr(41).data()

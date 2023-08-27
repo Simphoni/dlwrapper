@@ -4,6 +4,8 @@
 // used by unpickle when processing byte stream
 template <typename T> inline uint8_t read_uint8(T *ptr) noexcept { return *(uint8_t *)ptr; }
 
+template <typename T> inline uint16_t read_uint16(T *ptr) noexcept { return *(uint16_t *)ptr; }
+
 template <typename T> uint32_t read_uint32(T *ptr) { return *(uint32_t *)ptr; }
 
 void ZipFileParser::parse() {
@@ -50,7 +52,7 @@ void ZipFileParser::parse() {
     ptr += sizeof(CentralDirectoryHeader);
     std::string filename = std::string(ptr, header->file_name_length);
     ptr += header->file_name_length;
-    name_idx_map[filename] = i;
+    nameIdxMap[filename] = i;
     if (header->uncompressed_size != 0xFFFFFFFF) {
       assert(header->compressed_size == header->uncompressed_size);
       filesMeta.emplace_back(std::move(filename),
@@ -74,7 +76,7 @@ void ZipFileParser::parse() {
     assert(header->compression_method == 0);
     ptr += sizeof(LocalFileHeader);
     std::string filename = std::string(ptr, header->file_name_length);
-    uint64_t idx         = name_idx_map[filename];
+    uint64_t idx         = nameIdxMap[filename];
     ptr += header->file_name_length;
     ptr += header->extra_field_length;
     filesMeta[idx].buffer = ptr;
@@ -103,7 +105,55 @@ std::string LazyUnpickler::readline() {
   return line;
 }
 
-LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file) : file(_file) {
+uint64_t element_size(std::string dtype) {
+  uint64_t size = 0;
+  if (dtype == "Byte" || dtype == "Char" || dtype == "Uint8" || dtype == "Bool") {
+    size = 1;
+  } else if (dtype == "Half" || dtype == "Short") {
+    size = 2;
+  } else if (dtype == "Float" || dtype == "Int") {
+    size = 4;
+  } else if (dtype == "Double" || dtype == "Long") {
+    size = 8;
+  } else {
+    fprintf(stderr, "%s\n", dtype.c_str());
+    throw std::runtime_error("Data type not recognized.");
+  }
+  return size;
+}
+
+std::pair<std::string, uint64_t> parseStorageType(std::string attr) {
+  assert(attr.size() > 7);
+  auto len = attr.size();
+  assert(attr.substr(len - 7, 7) == "Storage");
+  std::string dtype = attr.substr(0, len - 7);
+  if (dtype == "Untyped") {
+    dtype = "Uint8";
+  }
+  uint64_t size = element_size(dtype);
+  return std::make_pair(std::move(dtype), size);
+}
+
+void LazyUnpickler::pytorchPersistentId(std::shared_ptr<object> tuple) {
+  assert(tuple->type == object::object_t::TUPLE);
+  assert(tuple->children.size() == 5);
+  assert(tuple->children[0]->extract_string() == "storage");
+  auto storage_type = tuple->children[1];
+  assert(storage_type->type == object::object_t::MODULE_ATTR);
+  assert(storage_type->children[0]->extract_string() == "torch");
+  auto [dtype, dsize]  = parseStorageType(storage_type->children[1]->extract_string());
+  std::string key      = tuple->children[2]->extract_string();
+  std::string location = tuple->children[3]->extract_string();
+  uint64_t numel       = tuple->children[4]->extract_int();
+  auto it              = storageMap.find(key);
+  assert(it != storageMap.end());
+  stack.emplace_back(std::make_shared<object>(
+      std::make_shared<Storage>(it->second, dtype, location, numel, dsize)));
+}
+
+LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
+                             std::unordered_map<std::string, char *> storageMap)
+    : file(_file), storageMap(storageMap) {
   unpickled     = false;
   actions[MARK] = [this]() {
     iterator++;
@@ -112,6 +162,53 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file) : file(_file) {
   actions[EMPTY_TUPLE] = [this]() {
     iterator++;
     stack.emplace_back(std::make_shared<object>(object::object_t::TUPLE));
+  };
+  actions[BININT1] = [this]() {
+    iterator++;
+    stack.emplace_back(std::make_shared<object>((int64_t)read_uint8(iterator)));
+    iterator++;
+  };
+  actions[BININT2] = [this]() {
+    iterator++;
+    stack.emplace_back(std::make_shared<object>((int64_t)read_uint16(iterator)));
+    iterator += 2;
+  };
+  actions[REDUCE] = [this]() {
+    iterator++;
+    auto arg = stack.back();
+    stack.pop_back();
+    auto func = stack.back();
+    stack.pop_back();
+    assert(func->type == object::object_t::MODULE_ATTR);
+    std::string method_name =
+        func->children[0]->extract_string() + "." + func->children[1]->extract_string();
+    try {
+      if (method_name == "torch._utils._rebuild_tensor_v2") {
+        fprintf(stderr, "\n\nrebuild tensor %s\n\n", arg->to_string().c_str());
+        stack.emplace_back(std::make_shared<object>(object::object_t::DUMMY, arg->children));
+      } else if (method_name == "collections.OrderedDict") {
+        stack.emplace_back(std::make_shared<object>(object::object_t::DICT, arg->children));
+      } else {
+        assert(0);
+      }
+    } catch (...) {
+      assert(0);
+    }
+  };
+  actions[BINPERSID] = [this]() {
+    iterator++;
+    pytorchPersistentId(stack.back());
+  };
+  actions[BINUNICODE] = [this] {
+    iterator++;
+    uint32_t len = read_uint32(iterator);
+    iterator += 4;
+    stack.emplace_back(std::make_shared<object>(std::string(iterator, len)));
+    iterator += len;
+  };
+  actions[EMPTY_LIST] = [this] {
+    iterator++;
+    stack.emplace_back(std::make_shared<object>(object::object_t::LIST));
   };
   actions[GLOBAL] = [this]() {
     iterator++;
@@ -127,6 +224,24 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file) : file(_file) {
     memo[idx]    = stack.back();
     iterator++;
   };
+  actions[LONG_BINPUT] = [this]() {
+    iterator++;
+    uint32_t idx = read_uint32(iterator);
+    memo[idx]    = stack.back();
+    iterator += 4;
+  };
+  actions[TUPLE] = [this]() {
+    iterator++;
+    assert(stack.size() > 0);
+    int mark = stack.size() - 1;
+    while (mark >= 0 && stack[mark]->type != object::object_t::MARK) {
+      mark--;
+    }
+    assert(mark >= 0);
+    std::vector<std::shared_ptr<object>> vec(stack.begin() + mark + 1, stack.end());
+    stack.erase(stack.begin() + mark, stack.end());
+    stack.emplace_back(std::make_shared<object>(object::object_t::TUPLE, std::move(vec)));
+  };
   actions[EMPTY_DICT] = [this]() {
     iterator++;
     stack.emplace_back(std::make_shared<object>(object::object_t::DICT));
@@ -135,6 +250,21 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file) : file(_file) {
     iterator++;
     assert(read_uint8(iterator) <= HIGHEST_PROTOCOL);
     iterator++;
+  };
+  actions[TUPLE2] = [this]() {
+    iterator++;
+    assert(stack.size() >= 2);
+    std::vector<std::shared_ptr<object>> vec(stack.end() - 2, stack.end());
+    stack.erase(stack.end() - 2, stack.end());
+    stack.emplace_back(std::make_shared<object>(object::object_t::TUPLE, std::move(vec)));
+  };
+  actions[NEWTRUE] = [this]() {
+    iterator++;
+    stack.emplace_back(std::make_shared<object>(true));
+  };
+  actions[NEWFALSE] = [this]() {
+    iterator++;
+    stack.emplace_back(std::make_shared<object>(false));
   };
 }
 
@@ -148,18 +278,25 @@ void LazyUnpickler::unpickle() {
   stack.reserve(256);
   assert(read_uint8(iterator) == 0x80);
   while (!stop_flag) {
-    printf("%02x\n", read_uint8(iterator));
-    actions[read_uint8(iterator)]();
+    fprintf(stderr, "%02x ", read_uint8(iterator));
+    try {
+      actions[read_uint8(iterator)]();
+    } catch (...) {
+      printf("\nerror parsing at ---> %d: %x\n", numit, read_uint8(iterator));
+      break;
+    }
 
     if (true) {
       numit++;
-      if (numit >= 4)
+      if (numit >= 43)
         break;
     }
   }
+  puts("");
   INFO("stack size: %ld", stack.size());
   for (auto i : stack)
     INFO("%s", i->to_string().c_str());
+  puts("");
   INFO("memo size: %ld", memo.size());
   for (auto i : memo)
     INFO("%u %s", i.first, i.second->to_string().c_str());
@@ -182,18 +319,27 @@ void PyTorchModelManager::load() {
     exit(0);
   }
   INFO("found model name: %s", modelname.c_str());
+  std::unordered_map<std::string, char *> storageMap;
   for (auto file : filesMeta) {
     assert(file.filename.length() > 0);
     auto pth = std::filesystem::path(file.filename);
-    assert(pth.begin()->string() == modelname);
+    auto it  = pth.begin();
+    assert(it->string() == modelname);
+    it++;
+    if (it->string() == "data") {
+      // it is a storage
+      it++;
+      assert(it != pth.end());
+      storageMap[it->string()] = file.buffer;
+    }
   }
 
   // load data.pkl
-  auto it = fileReader->name_idx_map.find(modelname + "/data.pkl");
-  assert(it != fileReader->name_idx_map.end());
+  auto it = fileReader->nameIdxMap.find(modelname + "/data.pkl");
+  assert(it != fileReader->nameIdxMap.end());
   INFO("found data.pkl, now unpickling%s", "...");
   UnzippedFileMeta &modelconf = filesMeta[it->second];
-  unpickler                   = std::make_shared<LazyUnpickler>(modelconf);
+  unpickler                   = std::make_shared<LazyUnpickler>(modelconf, std::move(storageMap));
   unpickler->unpickle();
 
   loaded = true;

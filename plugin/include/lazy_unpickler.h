@@ -1,4 +1,5 @@
 #include "misc.h"
+#include "tensor.h"
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -89,7 +90,7 @@ private:
 
 public:
   std::vector<UnzippedFileMeta> filesMeta;
-  std::unordered_map<std::string, uint64_t> name_idx_map;
+  std::unordered_map<std::string, uint64_t> nameIdxMap;
 
   ZipFileParser() = default;
   ZipFileParser(std::string _filename)
@@ -105,25 +106,51 @@ private:
   static const int HIGHEST_PROTOCOL = 2;
 
   UnzippedFileMeta file;
+  std::unordered_map<std::string, char *> storageMap;
   bool unpickled, stop_flag;
   std::function<void()> actions[256];
   char *iterator;
 
   struct object {
     enum object_t : uint8_t {
-      LEAF        = 1,
-      MODULE_ATTR = 2,
-      TUPLE       = 3,
-      DICT        = 4,
-      MARK        = 5,
+      LEAF = 1,
+      MODULE_ATTR,
+      TUPLE,
+      DICT,
+      LIST,
+      MARK,
+      DUMMY,
     };
     object_t type;
-    std::variant<std::string, int64_t> data; // for leaf nodes
+    std::variant<std::monostate, std::string, int64_t, bool> data; // for leaf nodes
+    std::shared_ptr<Storage> storage;
     std::vector<std::shared_ptr<object>> children;
 
-    object(object_t _type) : type(_type) {}
-    object(int64_t _data) : type(LEAF), data(_data) {}
-    object(std::string _data) : type(LEAF), data(_data) {}
+    object(std::shared_ptr<Storage> storage) : type(LEAF), storage(storage) {}
+    object(object_t type) : type(type) {}
+    object(bool data) : type(LEAF), data(data) {}
+    object(int64_t data) : type(LEAF), data(data) {}
+    object(std::string data) : type(LEAF), data(data) {}
+    object(object_t type, std::vector<std::shared_ptr<object>> children)
+        : type(type), children(children) {}
+
+    bool is_storage() {
+      // storage nodes are special, they are leaf nodes but are not basic types.
+      return type == LEAF && data.index() == 0 && storage != nullptr;
+    }
+
+    bool is_empty() { return type != LEAF && children.size() == 0; }
+
+    std::string extract_string() {
+      assert(type == LEAF && data.index() == 1);
+      return std::get<std::string>(data);
+    }
+
+    int64_t extract_int() {
+      assert(type == LEAF && data.index() == 2);
+      return std::get<int64_t>(data);
+    }
+
     std::string get_type_name(object_t value) {
       const char *s = 0;
 #define PROCESS_VAL(p)                                                                             \
@@ -135,21 +162,27 @@ private:
         PROCESS_VAL(MODULE_ATTR);
         PROCESS_VAL(TUPLE);
         PROCESS_VAL(DICT);
+        PROCESS_VAL(LIST);
         PROCESS_VAL(MARK);
+        PROCESS_VAL(DUMMY);
       default:
         assert(0);
       }
 #undef PROCESS_VAL
       return std::string(s);
     }
-    object(object_t _type, std::vector<std::shared_ptr<object>> _children)
-        : type(_type), children(_children) {}
+
     std::string to_string() {
       if (type == LEAF) {
-        if (data.index() == 0)
+        if (data.index() == 1) {
           return std::get<std::string>(data);
-        else
+        } else if (data.index() == 2) {
           return std::to_string(std::get<int64_t>(data));
+        } else if (data.index() == 3) {
+          return std::get<bool>(data) ? "True" : "False";
+        } else {
+          return "/storage/";
+        }
       } else {
         std::string ret = "(";
         ret += get_type_name(type) + " ";
@@ -169,16 +202,29 @@ private:
   enum opcode : uint8_t {
     MARK        = 0x28,
     EMPTY_TUPLE = 0x29,
+    BININT1     = 0x4b,
+    BININT2     = 0x4d,
+    BINPERSID   = 0x51,
     REDUCE      = 0x52,
+    BINUNICODE  = 0x58,
+    EMPTY_LIST  = 0x5d,
     GLOBAL      = 0x63,
     BINPUT      = 0x71,
+    LONG_BINPUT = 0x72,
+    TUPLE       = 0x74,
     EMPTY_DICT  = 0x7d,
     PROTO       = 0x80,
+    TUPLE2      = 0x86, // Protocol 2
+    NEWTRUE     = 0x88,
+    NEWFALSE    = 0x89,
   };
+
+  // pytorch rewrites persistent_id method to enable tensor loading during unpickling
+  void pytorchPersistentId(std::shared_ptr<object> tuple);
 
 public:
   LazyUnpickler() = delete;
-  LazyUnpickler(UnzippedFileMeta _file);
+  LazyUnpickler(UnzippedFileMeta _file, std::unordered_map<std::string, char *> _storageMap);
 
   std::string readline();
   void unpickle();
@@ -195,7 +241,7 @@ private:
 
 public:
   PyTorchModelManager() = default;
-  PyTorchModelManager(std::string _filename) : filename(_filename), loaded(false) {}
+  PyTorchModelManager(std::string filename) : filename(filename), loaded(false) {}
 
   void load();
 };
