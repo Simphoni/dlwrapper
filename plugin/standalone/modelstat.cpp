@@ -13,9 +13,7 @@ int main(int argc, char **argv) {
                     "2_preproc_almostall_1k-2k-4k_encapp_div16x12_upsample_fullrange_ctd_hull256-"
                     "merged-stack.th");
   }
-  ZipFileParser zfp{file};
-  for (auto &p : zfp.pickleFilesMeta) {
-    printf("File %s, %lu\n", p.filename.c_str(), p.size);
-  }
+  PyTorchModelManager manager(file);
+  manager.load();
   return 0;
 }

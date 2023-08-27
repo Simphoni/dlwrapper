@@ -2,11 +2,13 @@
 #define PLUGIN_ENABLE_INFO
 #define PLUGIN_ENABLE_DEBUG
 
+#include <cstdlib>
+
 /* /cpfs01/user/xingjingze/dlwrapper/plugin/include/device_manager.h */
 #define __FILE_BRIEF__ std::string(__FILE__).substr(41).data()
 
 #ifdef PLUGIN_ENABLE_INFO
-#define INFO(fmt, ...) fprintf(stderr, "[INFO]  \t" fmt "\n", __VA_ARGS__)
+#define INFO(fmt, ...) fprintf(stderr, "[INFO]\t" fmt "\n", __VA_ARGS__)
 #else
 #define INFO(...)
 #endif

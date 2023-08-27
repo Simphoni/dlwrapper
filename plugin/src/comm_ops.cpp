@@ -65,7 +65,7 @@ void NicoProcessGroup::scatter_cuda_uva(char *data, int src_rank, int64_t numel_
   }
   auto start_clk = ch::steady_clock::now();
   auto manager = DeviceContextManager::get();
-  int semid = _semid[SEM_GPU_COLL];
+  [[maybe_unused]] int semid = _semid[SEM_GPU_COLL];
 
   std::vector<void *> ptrs{data};
   if (groupRank != src_rank) {
