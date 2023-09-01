@@ -1,0 +1,37 @@
+[project]
+name = "dlwrapper"
+description = "A tailored library for DNN optimization."
+version = "0.1.0"
+requires-python = ">=3.8"
+dependencies = ["torch>=1.13.0"]
+
+[build-system]
+requires = ["py-build-cmake~=0.1.8"]
+build-backend = "py_build_cmake.build"
+
+[tool.py-build-cmake.module]
+directory = "python"
+
+[tool.py-build-cmake.sdist]
+include = ["CMakeLists.txt", "include/*", "src/*", "standalone/*"]
+
+[tool.py-build-cmake.cmake]
+minimum_version = "3.20"
+generator = "Ninja"
+build_type = "Debug"
+build_path = "build"
+install_components = ["torch_extension"]
+build_args = ["-j"]
+
+[tool.py-build-cmake.cmake.options]
+CMAKE_CUDA_COMPILER = "/cpfs01/user/xingjingze/condaenv/pkgs/cuda-toolkit/bin/nvcc"
+CMAKE_PREFIX_PATH = """\
+                    /cpfs01/user/xingjingze/condaenv/lib/python3.9/site-packages/torch/share/cmake;\
+                    /cpfs01/user/xingjingze/condaenv/lib/python3.9/site-packages/pybind11/share/cmake/pybind11\
+                    """
+CUDA_TOOLKIT_ROOT_DIR = "/cpfs01/user/xingjingze/condaenv/pkgs/cuda-toolkit"
+CUDNN_INCLUDE_DIR = "/cpfs01/user/xingjingze/condaenv/lib/python3.9/site-packages/nvidia/cudnn/include"
+CUDNN_LIBRARY_PATH = "/cpfs01/user/xingjingze/condaenv/lib/python3.9/site-packages/torch/lib/libcudnn.so.8"
+
+[tool.py-build-cmake.editable]
+mode = "symlink"

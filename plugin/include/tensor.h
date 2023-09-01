@@ -21,6 +21,26 @@ public:
 class UntypedTensor {
 private:
   std::shared_ptr<Storage> storage;
-  std::vector<uint64_t> dims, strides;
-  std::string name;
+  int64_t offset;
+  std::vector<int64_t> dims, strides;
+  bool requires_grad;
+
+public:
+  UntypedTensor(std::shared_ptr<Storage> storage, int64_t offset, std::vector<int64_t> dims,
+                std::vector<int64_t> strides, bool requires_grad)
+      : storage(storage), offset(offset), dims(dims), strides(strides),
+        requires_grad(requires_grad) {}
+
+  std::string to_string() {
+    std::string ret = "Tensor(dims=[";
+    for (auto &dim : dims) {
+      ret += std::to_string(dim) + ", ";
+    }
+    ret += "], strides=[";
+    for (auto &stride : strides) {
+      ret += std::to_string(stride) + ", ";
+    }
+    ret += "])";
+    return ret;
+  }
 };

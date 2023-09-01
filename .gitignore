@@ -6,3 +6,4 @@ dist/
 *.egg-info
 *.so
 core.*
+.py-build-cmake_cache/

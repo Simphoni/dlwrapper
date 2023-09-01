@@ -81,6 +81,7 @@ void ZipFileParser::parse() {
     ptr += header->extra_field_length;
     filesMeta[idx].buffer = ptr;
     ptr += filesMeta[idx].size;
+    printf("%s %lu\n", filename.c_str(), filesMeta[idx].size);
     if (i + 1 < n_entries_in_central_directory) {
       int counter = 0;
       while (read_uint32(ptr) != kLocalFileHeaderSignature) {
@@ -122,6 +123,16 @@ uint64_t element_size(std::string dtype) {
   return size;
 }
 
+int LazyUnpickler::find_mark() {
+  assert(stack.size() > 0);
+  int mark = stack.size() - 1;
+  while (mark >= 0 && stack[mark]->type != object::object_t::MARK) {
+    mark--;
+  }
+  assert(mark >= 0);
+  return mark;
+}
+
 std::pair<std::string, uint64_t> parseStorageType(std::string attr) {
   assert(attr.size() > 7);
   auto len = attr.size();
@@ -137,18 +148,31 @@ std::pair<std::string, uint64_t> parseStorageType(std::string attr) {
 void LazyUnpickler::pytorchPersistentId(std::shared_ptr<object> tuple) {
   assert(tuple->type == object::object_t::TUPLE);
   assert(tuple->children.size() == 5);
-  assert(tuple->children[0]->extract_string() == "storage");
+  assert(tuple->children[0]->extract_basic_type<std::string>() == "storage");
   auto storage_type = tuple->children[1];
   assert(storage_type->type == object::object_t::MODULE_ATTR);
-  assert(storage_type->children[0]->extract_string() == "torch");
-  auto [dtype, dsize]  = parseStorageType(storage_type->children[1]->extract_string());
-  std::string key      = tuple->children[2]->extract_string();
-  std::string location = tuple->children[3]->extract_string();
-  uint64_t numel       = tuple->children[4]->extract_int();
+  assert(storage_type->children[0]->extract_basic_type<std::string>() == "torch");
+  auto [dtype, dsize] =
+      parseStorageType(storage_type->children[1]->extract_basic_type<std::string>());
+  std::string key      = tuple->children[2]->extract_basic_type<std::string>();
+  std::string location = tuple->children[3]->extract_basic_type<std::string>();
+  uint64_t numel       = tuple->children[4]->extract_basic_type<int64_t>();
   auto it              = storageMap.find(key);
   assert(it != storageMap.end());
   stack.emplace_back(std::make_shared<object>(
       std::make_shared<Storage>(it->second, dtype, location, numel, dsize)));
+}
+
+std::shared_ptr<UntypedTensor>
+LazyUnpickler::torch_util_rebuild_tensor_v2(std::shared_ptr<object> tuple) {
+  auto storage        = tuple->children[0]->extract_storage();
+  auto offset         = tuple->children[1]->extract_basic_type<int64_t>();
+  auto size           = tuple->children[2]->extract_int_tuple<int64_t>();
+  auto stride         = tuple->children[3]->extract_int_tuple<int64_t>();
+  auto requires_grad  = tuple->children[4]->extract_basic_type<bool>();
+  auto backward_hooks = tuple->children[5]; // backwards compatibility, expect empty ordered dict
+  assert(backward_hooks->type == object::object_t::DICT);
+  return std::make_shared<UntypedTensor>(storage, offset, size, stride, requires_grad);
 }
 
 LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
@@ -162,6 +186,22 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
   actions[EMPTY_TUPLE] = [this]() {
     iterator++;
     stack.emplace_back(std::make_shared<object>(object::object_t::TUPLE));
+  };
+  actions[BINFLOAT] = [this]() {
+    iterator++;
+    /*
+    puts("");
+    for (int i = 0; i < 8; i++)
+      printf("%02x", (uint8_t)iterator[i]);
+    printf(" %.20lf\n", *(double *)iterator);
+    */
+    stack.emplace_back(std::make_shared<object>(*(double *)iterator));
+    iterator += 8;
+  };
+  actions[BININT] = [this]() {
+    iterator++;
+    stack.emplace_back(std::make_shared<object>((int64_t)(*(int *)iterator)));
+    iterator += 4;
   };
   actions[BININT1] = [this]() {
     iterator++;
@@ -180,12 +220,11 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
     auto func = stack.back();
     stack.pop_back();
     assert(func->type == object::object_t::MODULE_ATTR);
-    std::string method_name =
-        func->children[0]->extract_string() + "." + func->children[1]->extract_string();
+    std::string method_name = func->children[0]->extract_basic_type<std::string>() + "." +
+                              func->children[1]->extract_basic_type<std::string>();
     try {
       if (method_name == "torch._utils._rebuild_tensor_v2") {
-        fprintf(stderr, "\n\nrebuild tensor %s\n\n", arg->to_string().c_str());
-        stack.emplace_back(std::make_shared<object>(object::object_t::DUMMY, arg->children));
+        stack.emplace_back(std::make_shared<object>(torch_util_rebuild_tensor_v2(arg)));
       } else if (method_name == "collections.OrderedDict") {
         stack.emplace_back(std::make_shared<object>(object::object_t::DICT, arg->children));
       } else {
@@ -197,7 +236,9 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
   };
   actions[BINPERSID] = [this]() {
     iterator++;
-    pytorchPersistentId(stack.back());
+    auto ptr = stack.back();
+    stack.pop_back();
+    pytorchPersistentId(ptr);
   };
   actions[BINUNICODE] = [this] {
     iterator++;
@@ -210,6 +251,14 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
     iterator++;
     stack.emplace_back(std::make_shared<object>(object::object_t::LIST));
   };
+  actions[APPEND] = [this]() {
+    iterator++;
+    assert(stack.size() >= 2);
+    auto obj = stack.back();
+    stack.pop_back();
+    assert(stack.back()->type == object::object_t::LIST);
+    stack.back()->children.emplace_back(std::move(obj));
+  };
   actions[GLOBAL] = [this]() {
     iterator++;
     auto module = readline();
@@ -217,6 +266,26 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
     std::vector<std::shared_ptr<object>> vec(
         {std::make_shared<object>(std::move(module)), std::make_shared<object>(std::move(name))});
     stack.emplace_back(std::make_shared<object>(object::object_t::MODULE_ATTR, std::move(vec)));
+  };
+  actions[APPENDS] = [this]() {
+    iterator++;
+    int mark = find_mark();
+    assert(mark > 0);
+    assert(stack[mark - 1]->type == object::object_t::LIST);
+    std::vector<std::shared_ptr<object>> &vec = stack[mark - 1]->children;
+    vec.reserve(vec.size() + stack.size() - mark - 1);
+    vec.insert(vec.end(), stack.begin() + mark + 1, stack.end());
+    stack.erase(stack.begin() + mark, stack.end());
+  };
+  actions[BINGET] = [this]() {
+    iterator++;
+    uint32_t idx = read_uint8(iterator);
+    iterator++;
+    try {
+      stack.emplace_back(memo[idx]);
+    } catch (...) {
+      assert(0);
+    }
   };
   actions[BINPUT] = [this]() {
     iterator++;
@@ -232,15 +301,19 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
   };
   actions[TUPLE] = [this]() {
     iterator++;
-    assert(stack.size() > 0);
-    int mark = stack.size() - 1;
-    while (mark >= 0 && stack[mark]->type != object::object_t::MARK) {
-      mark--;
-    }
-    assert(mark >= 0);
+    int mark = find_mark();
     std::vector<std::shared_ptr<object>> vec(stack.begin() + mark + 1, stack.end());
     stack.erase(stack.begin() + mark, stack.end());
     stack.emplace_back(std::make_shared<object>(object::object_t::TUPLE, std::move(vec)));
+  };
+  actions[SETITEMS] = [this]() {
+    iterator++;
+    int mark = find_mark();
+    assert(stack[mark - 1]->type == object::object_t::DICT);
+    std::vector<std::shared_ptr<object>> &vec = stack[mark - 1]->children;
+    vec.reserve(vec.size() + stack.size() - mark - 1);
+    vec.insert(vec.end(), stack.begin() + mark + 1, stack.end());
+    stack.erase(stack.begin() + mark, stack.end());
   };
   actions[EMPTY_DICT] = [this]() {
     iterator++;
@@ -288,7 +361,7 @@ void LazyUnpickler::unpickle() {
 
     if (true) {
       numit++;
-      if (numit >= 43)
+      if (numit >= 400)
         break;
     }
   }

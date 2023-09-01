@@ -23,7 +23,9 @@ inline void _cuda_safe_call(cudaError_t err, const char *file, int line) {
 
 #ifdef PLUGIN_ENABLE_NCCL
 
-#define USE_C10D_NCCL // enable ProcessGroupNCCL
+#ifndef USE_C10D_NCCL
+#define USE_C10D_NCCL
+#endif
 #include "nccl.h"
 
 #define NCCL_SAFE_CALL(__fn__) _nccl_safe_call(__fn__, __FILE_BRIEF__, __LINE__)

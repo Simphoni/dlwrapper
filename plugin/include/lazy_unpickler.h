@@ -119,18 +119,22 @@ private:
       DICT,
       LIST,
       MARK,
+      TENSOR,
       DUMMY,
     };
     object_t type;
-    std::variant<std::monostate, std::string, int64_t, bool> data; // for leaf nodes
+    std::variant<std::monostate, std::string, int64_t, bool, double> data; // for leaf nodes
     std::shared_ptr<Storage> storage;
+    std::shared_ptr<UntypedTensor> tensor;
     std::vector<std::shared_ptr<object>> children;
 
-    object(std::shared_ptr<Storage> storage) : type(LEAF), storage(storage) {}
     object(object_t type) : type(type) {}
     object(bool data) : type(LEAF), data(data) {}
     object(int64_t data) : type(LEAF), data(data) {}
     object(std::string data) : type(LEAF), data(data) {}
+    object(double data) : type(LEAF), data(data) {}
+    object(std::shared_ptr<Storage> storage) : type(LEAF), storage(storage) {}
+    object(std::shared_ptr<UntypedTensor> tensor) : type(LEAF), tensor(tensor) {}
     object(object_t type, std::vector<std::shared_ptr<object>> children)
         : type(type), children(children) {}
 
@@ -138,17 +142,30 @@ private:
       // storage nodes are special, they are leaf nodes but are not basic types.
       return type == LEAF && data.index() == 0 && storage != nullptr;
     }
+    bool is_tensor() {
+      // tensor nodes are special, they are leaf nodes but are not basic types.
+      return type == LEAF && data.index() == 0 && tensor != nullptr;
+    }
 
     bool is_empty() { return type != LEAF && children.size() == 0; }
 
-    std::string extract_string() {
-      assert(type == LEAF && data.index() == 1);
-      return std::get<std::string>(data);
+    template <typename T> T extract_basic_type() {
+      assert(type == LEAF && std::holds_alternative<T>(data));
+      return std::get<T>(data);
     }
 
-    int64_t extract_int() {
-      assert(type == LEAF && data.index() == 2);
-      return std::get<int64_t>(data);
+    std::shared_ptr<Storage> extract_storage() {
+      assert(type == LEAF && data.index() == 0);
+      return storage;
+    }
+
+    template <typename T> std::vector<T> extract_int_tuple() {
+      assert(type == TUPLE);
+      std::vector<T> ret;
+      for (auto &child : children) {
+        ret.push_back((T)child->extract_basic_type<int64_t>());
+      }
+      return ret;
     }
 
     std::string get_type_name(object_t value) {
@@ -164,6 +181,7 @@ private:
         PROCESS_VAL(DICT);
         PROCESS_VAL(LIST);
         PROCESS_VAL(MARK);
+        PROCESS_VAL(TENSOR);
         PROCESS_VAL(DUMMY);
       default:
         assert(0);
@@ -175,13 +193,20 @@ private:
     std::string to_string() {
       if (type == LEAF) {
         if (data.index() == 1) {
-          return std::get<std::string>(data);
+          return "\"" + std::get<std::string>(data) + "\"";
         } else if (data.index() == 2) {
           return std::to_string(std::get<int64_t>(data));
         } else if (data.index() == 3) {
           return std::get<bool>(data) ? "True" : "False";
-        } else {
+        } else if (data.index() == 4) {
+          return std::to_string(std::get<double>(data));
+        } else if (storage != nullptr) {
           return "/storage/";
+        } else if (tensor != nullptr) {
+          return tensor->to_string();
+        } else {
+          assert(0);
+          return "";
         }
       } else {
         std::string ret = "(";
@@ -202,16 +227,22 @@ private:
   enum opcode : uint8_t {
     MARK        = 0x28,
     EMPTY_TUPLE = 0x29,
+    BINFLOAT    = 0x47,
+    BININT      = 0x4a,
     BININT1     = 0x4b,
     BININT2     = 0x4d,
     BINPERSID   = 0x51,
     REDUCE      = 0x52,
     BINUNICODE  = 0x58,
     EMPTY_LIST  = 0x5d,
+    APPEND      = 0x61,
     GLOBAL      = 0x63,
+    APPENDS     = 0x65,
+    BINGET      = 0x68,
     BINPUT      = 0x71,
     LONG_BINPUT = 0x72,
     TUPLE       = 0x74,
+    SETITEMS    = 0x75,
     EMPTY_DICT  = 0x7d,
     PROTO       = 0x80,
     TUPLE2      = 0x86, // Protocol 2
@@ -219,8 +250,11 @@ private:
     NEWFALSE    = 0x89,
   };
 
+  int find_mark();
+
   // pytorch rewrites persistent_id method to enable tensor loading during unpickling
   void pytorchPersistentId(std::shared_ptr<object> tuple);
+  std::shared_ptr<UntypedTensor> torch_util_rebuild_tensor_v2(std::shared_ptr<object> tuple);
 
 public:
   LazyUnpickler() = delete;
