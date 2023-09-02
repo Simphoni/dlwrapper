@@ -12,5 +12,18 @@ All notable changes to DLWrapper will be documented in this file.
 - Intranode all_gather and scatter operator, subsequent calls reached >300GB/s
 
 ### TODO
+
 - Support internode communication domains with NCCL
 - Implement lazy unpickler to manage PyTorch model files
+
+## 0.1.0 - 2023-9-2
+
+### Added
+
+- Partial implementation of PyTorch model manager and its unpickler
+- Changed build system to py-build-cmake
+- Removed old `setup.py`
+
+### TODO
+
+- Fully implement PyTorch model manager

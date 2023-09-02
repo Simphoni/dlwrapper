@@ -2,6 +2,10 @@
 #define PLUGIN_ENABLE_INFO
 #define PLUGIN_ENABLE_DEBUG
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+
 #include <cstdlib>
 #include <stdexcept>
 
