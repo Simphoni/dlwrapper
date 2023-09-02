@@ -3,6 +3,8 @@
 #include "nv_common.h"
 #include <torch/extension.h>
 
+namespace py = pybind11;
+
 void test_ipc_allgather();
 
 PYBIND11_MODULE(dlwrapperffi, m) {

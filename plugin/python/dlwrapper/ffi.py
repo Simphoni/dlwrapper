@@ -1,5 +1,6 @@
+__all__ = ["nico_native"]
+
 import torch
 from . import dlwrapperffi
-from dlwrapperffi import nico_native
 
-__all__ = ["nico_native"]
+nico_native = dlwrapperffi.nico_native
