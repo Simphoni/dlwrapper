@@ -5,7 +5,7 @@
 
 void test_ipc_allgather();
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+PYBIND11_MODULE(dlwrapperffi, m) {
   m.doc() = "An extensively tailored CUDA library for machine learning.";
 
   // == nico submodule ==

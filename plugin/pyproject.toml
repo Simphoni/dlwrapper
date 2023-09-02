@@ -23,6 +23,10 @@ build_path = "build"
 install_components = ["torch_extension"]
 build_args = ["-j"]
 
+[tool.py-build-cmake.cmake.env]
+CMAKE_C_COMPILER_LAUNCHER = "ccache"
+CMAKE_CXX_COMPILER_LAUNCHER = "ccache"
+
 [tool.py-build-cmake.cmake.options]
 CMAKE_CUDA_COMPILER = "/cpfs01/user/xingjingze/condaenv/pkgs/cuda-toolkit/bin/nvcc"
 CMAKE_PREFIX_PATH = """\
