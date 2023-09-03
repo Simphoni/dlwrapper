@@ -13,5 +13,4 @@ fi
 unset __conda_setup
 conda activate nerf
 cd plugin
-#pip install -e .
-MAX_JOBS=6 python setup.py develop --prefix=${HOME}/.local
+pip install -v -e .

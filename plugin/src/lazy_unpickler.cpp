@@ -1,5 +1,16 @@
 #include "lazy_unpickler.h"
-#include <unordered_map>
+#include <chrono>
+#include <pybind11/stl.h>
+
+namespace ch = std::chrono;
+
+void initalizePyInterp() {
+  static bool initialized = false;
+  if (!initialized) {
+    initialized = true;
+    py::initialize_interpreter();
+  }
+}
 
 // used by unpickle when processing byte stream
 template <typename T> inline uint8_t read_uint8(T *ptr) noexcept { return *(uint8_t *)ptr; }
@@ -97,6 +108,111 @@ void ZipFileParser::parse() {
 
 ZipFileParser::~ZipFileParser() { munmap(gigabuffer, filelen); }
 
+// ------------------- LazyUnpickler -------------------
+
+std::string LazyUnpickler::object::get_type_name(object_t value) {
+  const char *s = 0;
+#define PROCESS_VAL(p)                                                                             \
+  case (p):                                                                                        \
+    s = #p;                                                                                        \
+    break;
+  switch (value) {
+    PROCESS_VAL(LEAF);
+    PROCESS_VAL(MODULE_ATTR);
+    PROCESS_VAL(TUPLE);
+    PROCESS_VAL(DICT);
+    PROCESS_VAL(LIST);
+    PROCESS_VAL(MARK);
+    PROCESS_VAL(ORDERED_DICT);
+    PROCESS_VAL(DUMMY);
+  default:
+    assert(0);
+  }
+#undef PROCESS_VAL
+  return std::string(s);
+}
+
+std::string LazyUnpickler::object::to_string() {
+  if (type == LEAF) {
+    if (data.index() == 1) {
+      return "\"" + std::get<std::string>(data) + "\"";
+    } else if (data.index() == 2) {
+      return std::to_string(std::get<int64_t>(data));
+    } else if (data.index() == 3) {
+      return std::get<bool>(data) ? "True" : "False";
+    } else if (data.index() == 4) {
+      return std::to_string(std::get<double>(data));
+    } else if (storage != nullptr) {
+      return "/storage/";
+    } else if (tensor != nullptr) {
+      return tensor->to_string();
+    } else if (pyobj != std::nullopt) {
+      return "pyobject(" + py::cast<std::string>(py::str(pyobj.value())) + ")";
+    } else {
+      assert(0);
+      return "";
+    }
+  } else {
+    std::string ret = "(";
+    ret += get_type_name(type) + " ";
+    for (auto &child : children) {
+      ret += child->to_string();
+      ret += ", ";
+    }
+    if (attr != std::nullopt) {
+      ret += "attr: {";
+      for (auto &kv : attr.value()) {
+        ret += kv.first + ": " + kv.second->to_string() + ", ";
+      }
+      ret += "}";
+    }
+    ret += ")";
+    return ret;
+  }
+}
+
+py::object LazyUnpickler::object::to_pyobject() const {
+  assert(type != MARK);
+  if (type == NONE) {
+    return py::none();
+  } else if (type == LEAF) {
+    if (data.index() == 1) {
+      return py::cast(std::get<std::string>(data));
+    } else if (data.index() == 2) {
+      return py::cast(std::get<int64_t>(data));
+    } else if (data.index() == 3) {
+      return py::cast(std::get<bool>(data));
+    } else if (data.index() == 4) {
+      return py::cast(std::get<double>(data));
+    } else if (pyobj != std::nullopt) {
+      return pyobj.value();
+    } else {
+      assert(0);
+    }
+  } else if (type == MODULE_ATTR) {
+    auto module = children[0]->extract_basic_type<std::string>();
+    auto attr   = children[1]->extract_basic_type<std::string>();
+    return py::module_::import(module.c_str()).attr(attr.c_str());
+  } else if (type == TUPLE || type == LIST) {
+    std::vector<py::object> vec;
+    for (const auto &child : children) {
+      vec.push_back(child->to_pyobject());
+    }
+    auto pylist = py::cast(vec);
+    return type == TUPLE ? py::tuple(pylist) : pylist;
+  } else if (type == DICT) {
+    std::map<std::string, py::object> dict;
+    for (const auto &child : children) {
+      dict.insert(std::make_pair(child->children[0]->extract_basic_type<std::string>(),
+                                 child->children[1]->to_pyobject()));
+    }
+    return py::cast(dict);
+  } else {
+    fprintf(stderr, "not guarded");
+    throw(std::runtime_error("Unsupported type"));
+  }
+}
+
 std::string LazyUnpickler::readline() {
   char *tail = iterator;
   while (*tail != '\n')
@@ -171,7 +287,7 @@ LazyUnpickler::torch_util_rebuild_tensor_v2(std::shared_ptr<object> tuple) {
   auto stride         = tuple->children[3]->extract_int_tuple<int64_t>();
   auto requires_grad  = tuple->children[4]->extract_basic_type<bool>();
   auto backward_hooks = tuple->children[5]; // backwards compatibility, expect empty ordered dict
-  assert(backward_hooks->type == object::object_t::DICT);
+  assert(backward_hooks->type == object::object_t::ORDERED_DICT);
   return std::make_shared<UntypedTensor>(storage, offset, size, stride, requires_grad);
 }
 
@@ -186,6 +302,10 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
   actions[EMPTY_TUPLE] = [this]() {
     iterator++;
     stack.emplace_back(std::make_shared<object>(object::object_t::TUPLE));
+  };
+  actions[STOP] = [this]() {
+    iterator++;
+    stop_flag = true;
   };
   actions[BINFLOAT] = [this]() {
     iterator++;
@@ -213,6 +333,10 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
     stack.emplace_back(std::make_shared<object>((int64_t)read_uint16(iterator)));
     iterator += 2;
   };
+  actions[NONE] = [this]() {
+    iterator++;
+    stack.emplace_back(std::make_shared<object>(object::object_t::NONE));
+  };
   actions[REDUCE] = [this]() {
     iterator++;
     auto arg = stack.back();
@@ -222,16 +346,16 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
     assert(func->type == object::object_t::MODULE_ATTR);
     std::string method_name = func->children[0]->extract_basic_type<std::string>() + "." +
                               func->children[1]->extract_basic_type<std::string>();
-    try {
-      if (method_name == "torch._utils._rebuild_tensor_v2") {
-        stack.emplace_back(std::make_shared<object>(torch_util_rebuild_tensor_v2(arg)));
-      } else if (method_name == "collections.OrderedDict") {
-        stack.emplace_back(std::make_shared<object>(object::object_t::DICT, arg->children));
-      } else {
-        assert(0);
-      }
-    } catch (...) {
-      assert(0);
+    if (method_name == "torch._utils._rebuild_tensor_v2") {
+      stack.emplace_back(std::make_shared<object>(torch_util_rebuild_tensor_v2(arg)));
+    } else if (method_name == "collections.OrderedDict") {
+      stack.emplace_back(std::make_shared<object>(object::object_t::ORDERED_DICT, arg->children));
+    } else if (method_name == "_codecs.encode") { // ignore encoding operations
+      stack.emplace_back(arg->children[0]);
+    } else {
+      py::object pyfunc = func->to_pyobject();
+      py::object pyargs = arg->to_pyobject();
+      stack.emplace_back(std::make_shared<object>(pyfunc(*pyargs)));
     }
   };
   actions[BINPERSID] = [this]() {
@@ -258,6 +382,15 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
     stack.pop_back();
     assert(stack.back()->type == object::object_t::LIST);
     stack.back()->children.emplace_back(std::move(obj));
+  };
+  actions[BUILD] = [this]() {
+    iterator++;
+    auto state = stack.back();
+    stack.pop_back();
+    auto instance = stack.back();
+    if (instance->type == object::object_t::ORDERED_DICT) {
+      instance->extend_attr(state);
+    }
   };
   actions[GLOBAL] = [this]() {
     iterator++;
@@ -299,6 +432,18 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
     memo[idx]    = stack.back();
     iterator += 4;
   };
+  actions[SETITEM] = [this]() {
+    iterator++;
+    assert(stack.size() >= 3);
+    auto val = stack.back();
+    stack.pop_back();
+    auto key = stack.back();
+    stack.pop_back();
+    assert(stack.back()->type == object::object_t::DICT ||
+           stack.back()->type == object::object_t::ORDERED_DICT);
+    stack.back()->children.emplace_back(std::move(key));
+    stack.back()->children.emplace_back(std::move(val));
+  };
   actions[TUPLE] = [this]() {
     iterator++;
     int mark = find_mark();
@@ -309,7 +454,8 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
   actions[SETITEMS] = [this]() {
     iterator++;
     int mark = find_mark();
-    assert(stack[mark - 1]->type == object::object_t::DICT);
+    assert(stack[mark - 1]->type == object::object_t::DICT ||
+           stack[mark - 1]->type == object::object_t::ORDERED_DICT);
     std::vector<std::shared_ptr<object>> &vec = stack[mark - 1]->children;
     vec.reserve(vec.size() + stack.size() - mark - 1);
     vec.insert(vec.end(), stack.begin() + mark + 1, stack.end());
@@ -324,11 +470,25 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
     assert(read_uint8(iterator) <= HIGHEST_PROTOCOL);
     iterator++;
   };
+  actions[TUPLE1] = [this]() {
+    iterator++;
+    assert(stack.size() >= 1);
+    std::vector<std::shared_ptr<object>> vec(stack.end() - 1, stack.end());
+    stack.erase(stack.end() - 1, stack.end());
+    stack.emplace_back(std::make_shared<object>(object::object_t::TUPLE, std::move(vec)));
+  };
   actions[TUPLE2] = [this]() {
     iterator++;
     assert(stack.size() >= 2);
     std::vector<std::shared_ptr<object>> vec(stack.end() - 2, stack.end());
     stack.erase(stack.end() - 2, stack.end());
+    stack.emplace_back(std::make_shared<object>(object::object_t::TUPLE, std::move(vec)));
+  };
+  actions[TUPLE3] = [this]() {
+    iterator++;
+    assert(stack.size() >= 3);
+    std::vector<std::shared_ptr<object>> vec(stack.end() - 3, stack.end());
+    stack.erase(stack.end() - 3, stack.end());
     stack.emplace_back(std::make_shared<object>(object::object_t::TUPLE, std::move(vec)));
   };
   actions[NEWTRUE] = [this]() {
@@ -339,59 +499,67 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
     iterator++;
     stack.emplace_back(std::make_shared<object>(false));
   };
+  actions[LONG1] = [this]() {
+    iterator++;
+    uint8_t len = read_uint8(iterator);
+    assert(len <= 8);
+    iterator++;
+    int64_t val = 0;
+    for (int i = 0; i < len; i++) {
+      val = val << 8 | read_uint8(iterator);
+      iterator++;
+    }
+    stack.emplace_back(std::make_shared<object>(val));
+  };
 }
 
-void LazyUnpickler::unpickle() {
-  int numit = 0;
-
+std::shared_ptr<LazyUnpickler::object> LazyUnpickler::unpickle() {
   if (unpickled)
-    return;
+    return stack[0];
   stop_flag = false;
   iterator  = file.buffer;
   stack.reserve(256);
   assert(read_uint8(iterator) == 0x80);
+  bool print_debug_info = false;
   while (!stop_flag) {
-    fprintf(stderr, "%02x ", read_uint8(iterator));
-    try {
-      actions[read_uint8(iterator)]();
-    } catch (...) {
-      printf("\nerror parsing at ---> %d: %x\n", numit, read_uint8(iterator));
-      break;
+    static int numit = 0;
+    if (print_debug_info) {
+      fprintf(stderr, "(%d %02x) ", numit, read_uint8(iterator));
     }
 
-    if (true) {
+    actions[read_uint8(iterator)]();
+
+    if (print_debug_info) {
       numit++;
-      if (numit >= 400)
+      if (numit >= 2000)
         break;
     }
   }
-  puts("");
-  INFO("stack size: %ld", stack.size());
-  for (auto i : stack)
-    INFO("%s", i->to_string().c_str());
-  puts("");
-  INFO("memo size: %ld", memo.size());
-  for (auto i : memo)
-    INFO("%u %s", i.first, i.second->to_string().c_str());
-  unpickled = true;
+  if (print_debug_info) {
+    puts("");
+    INFO("stack size: %ld", stack.size());
+    for (auto i : stack)
+      INFO("%s", i->to_string().c_str());
+  }
+  assert(stack.size() == 1);
+  return stack[0];
 }
 
 void PyTorchModelManager::load() {
   if (loaded)
     return;
+  initalizePyInterp();
+  // py::scoped_interpreter guard{};
   INFO("loading model from %s", filename.c_str());
   fileReader = std::make_shared<ZipFileParser>(filename);
   fileReader->parse();
 
-  // validate file format
+  // validate model file format
   std::vector<UnzippedFileMeta> &filesMeta = fileReader->filesMeta;
-  try {
-    modelname = std::filesystem::path(filesMeta[0].filename).begin()->string();
-  } catch (...) {
-    fprintf(stderr, "PyTorchModelManager: file format error\n");
-    exit(0);
-  }
+  modelname = std::filesystem::path(filesMeta[0].filename).begin()->string();
   INFO("found model name: %s", modelname.c_str());
+
+  // pass a simplified kv mapping to unpickler
   std::unordered_map<std::string, char *> storageMap;
   for (auto file : filesMeta) {
     assert(file.filename.length() > 0);
@@ -411,9 +579,14 @@ void PyTorchModelManager::load() {
   auto it = fileReader->nameIdxMap.find(modelname + "/data.pkl");
   assert(it != fileReader->nameIdxMap.end());
   INFO("found data.pkl, now unpickling%s", "...");
-  UnzippedFileMeta &modelconf = filesMeta[it->second];
-  unpickler                   = std::make_shared<LazyUnpickler>(modelconf, std::move(storageMap));
-  unpickler->unpickle();
+  auto &modelconf   = filesMeta[it->second];
+  unpickler         = std::make_shared<LazyUnpickler>(modelconf, std::move(storageMap));
+  auto parse_start  = ch::high_resolution_clock::now();
+  auto parse_result = unpickler->unpickle();
+  auto parse_end    = ch::high_resolution_clock::now();
+  INFO("data.pkl parsed successfully in %ld ms",
+       ch::duration_cast<ch::milliseconds>(parse_end - parse_start).count());
+  INFO("parsed data:\n%s", parse_result->to_string().c_str());
 
   loaded = true;
 }

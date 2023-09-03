@@ -1,16 +1,24 @@
 #include "misc.h"
 #include "tensor.h"
 #include <fcntl.h>
+#include <pybind11/embed.h>
+#include <pybind11/pybind11.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
 #include <cassert>
 #include <filesystem>
 #include <functional>
+#include <map>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <variant>
 #include <vector>
+
+namespace py = pybind11;
+
+void initalizePyInterp();
 
 enum ZipSignatures : uint32_t {
   kLocalFileHeaderSignature                   = 0x04034b50,
@@ -111,15 +119,17 @@ private:
   std::function<void()> actions[256];
   char *iterator;
 
+public:
   struct object {
     enum object_t : uint8_t {
-      LEAF = 1,
+      NONE = 1,
+      LEAF,
       MODULE_ATTR,
       TUPLE,
-      DICT,
       LIST,
+      DICT,
+      ORDERED_DICT,
       MARK,
-      TENSOR,
       DUMMY,
     };
     object_t type;
@@ -127,6 +137,8 @@ private:
     std::shared_ptr<Storage> storage;
     std::shared_ptr<UntypedTensor> tensor;
     std::vector<std::shared_ptr<object>> children;
+    std::optional<std::map<std::string, std::shared_ptr<object>>> attr;
+    std::optional<py::object> pyobj;
 
     object(object_t type) : type(type) {}
     object(bool data) : type(LEAF), data(data) {}
@@ -135,18 +147,26 @@ private:
     object(double data) : type(LEAF), data(data) {}
     object(std::shared_ptr<Storage> storage) : type(LEAF), storage(storage) {}
     object(std::shared_ptr<UntypedTensor> tensor) : type(LEAF), tensor(tensor) {}
+    object(py::object obj) : type(LEAF), pyobj(obj) {}
     object(object_t type, std::vector<std::shared_ptr<object>> children)
         : type(type), children(children) {}
 
-    bool is_storage() {
-      // storage nodes are special, they are leaf nodes but are not basic types.
-      return type == LEAF && data.index() == 0 && storage != nullptr;
-    }
-    bool is_tensor() {
-      // tensor nodes are special, they are leaf nodes but are not basic types.
-      return type == LEAF && data.index() == 0 && tensor != nullptr;
+    void extend_attr(std::shared_ptr<object> dict) {
+      if (attr == std::nullopt) {
+        attr = std::map<std::string, std::shared_ptr<object>>();
+      }
+      assert(dict->type == DICT || dict->type == ORDERED_DICT);
+      for (size_t i = 0; i < dict->children.size(); i += 2) {
+        if (dict->children[i]->type == LEAF || dict->children[i]->data.index() == 1) {
+          auto key   = std::get<std::string>(dict->children[i]->data);
+          auto value = dict->children[i + 1];
+          attr->insert(std::make_pair(key, value));
+        }
+      }
     }
 
+    bool is_storage() { return type == LEAF && data.index() == 0 && storage != nullptr; }
+    bool is_tensor() { return type == LEAF && data.index() == 0 && tensor != nullptr; }
     bool is_empty() { return type != LEAF && children.size() == 0; }
 
     template <typename T> T extract_basic_type() {
@@ -168,86 +188,46 @@ private:
       return ret;
     }
 
-    std::string get_type_name(object_t value) {
-      const char *s = 0;
-#define PROCESS_VAL(p)                                                                             \
-  case (p):                                                                                        \
-    s = #p;                                                                                        \
-    break;
-      switch (value) {
-        PROCESS_VAL(LEAF);
-        PROCESS_VAL(MODULE_ATTR);
-        PROCESS_VAL(TUPLE);
-        PROCESS_VAL(DICT);
-        PROCESS_VAL(LIST);
-        PROCESS_VAL(MARK);
-        PROCESS_VAL(TENSOR);
-        PROCESS_VAL(DUMMY);
-      default:
-        assert(0);
-      }
-#undef PROCESS_VAL
-      return std::string(s);
-    }
-
-    std::string to_string() {
-      if (type == LEAF) {
-        if (data.index() == 1) {
-          return "\"" + std::get<std::string>(data) + "\"";
-        } else if (data.index() == 2) {
-          return std::to_string(std::get<int64_t>(data));
-        } else if (data.index() == 3) {
-          return std::get<bool>(data) ? "True" : "False";
-        } else if (data.index() == 4) {
-          return std::to_string(std::get<double>(data));
-        } else if (storage != nullptr) {
-          return "/storage/";
-        } else if (tensor != nullptr) {
-          return tensor->to_string();
-        } else {
-          assert(0);
-          return "";
-        }
-      } else {
-        std::string ret = "(";
-        ret += get_type_name(type) + " ";
-        for (auto &child : children) {
-          ret += child->to_string();
-          ret += ", ";
-        }
-        ret += ")";
-        return ret;
-      }
-    }
+    std::string get_type_name(object_t value);
+    std::string to_string();
+    py::object to_pyobject() const;
   };
 
+private:
   std::vector<std::shared_ptr<object>> stack;
   std::unordered_map<uint32_t, std::shared_ptr<object>> memo;
 
   enum opcode : uint8_t {
     MARK        = 0x28,
     EMPTY_TUPLE = 0x29,
+    STOP        = 0x2e,
     BINFLOAT    = 0x47,
     BININT      = 0x4a,
     BININT1     = 0x4b,
     BININT2     = 0x4d,
+    NONE        = 0x4e,
     BINPERSID   = 0x51,
     REDUCE      = 0x52,
     BINUNICODE  = 0x58,
     EMPTY_LIST  = 0x5d,
     APPEND      = 0x61,
+    BUILD       = 0x62,
     GLOBAL      = 0x63,
     APPENDS     = 0x65,
     BINGET      = 0x68,
     BINPUT      = 0x71,
     LONG_BINPUT = 0x72,
+    SETITEM     = 0x73,
     TUPLE       = 0x74,
     SETITEMS    = 0x75,
     EMPTY_DICT  = 0x7d,
     PROTO       = 0x80,
-    TUPLE2      = 0x86, // Protocol 2
+    TUPLE1      = 0x85, // Protocol 2
+    TUPLE2      = 0x86,
+    TUPLE3      = 0x87,
     NEWTRUE     = 0x88,
     NEWFALSE    = 0x89,
+    LONG1       = 0x8a,
   };
 
   int find_mark();
@@ -261,7 +241,7 @@ public:
   LazyUnpickler(UnzippedFileMeta _file, std::unordered_map<std::string, char *> _storageMap);
 
   std::string readline();
-  void unpickle();
+  std::shared_ptr<object> unpickle();
 };
 
 class PyTorchModelManager {
