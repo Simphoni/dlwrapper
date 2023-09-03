@@ -12,12 +12,14 @@ void initalizePyInterp() {
   }
 }
 
-// used by unpickle when processing byte stream
+// used by unpickler when processing byte stream
 template <typename T> inline uint8_t read_uint8(T *ptr) noexcept { return *(uint8_t *)ptr; }
-
 template <typename T> inline uint16_t read_uint16(T *ptr) noexcept { return *(uint16_t *)ptr; }
-
-template <typename T> uint32_t read_uint32(T *ptr) { return *(uint32_t *)ptr; }
+template <typename T> inline uint32_t read_uint32(T *ptr) { return *(uint32_t *)ptr; }
+double read_big_endian_double(char *ptr) {
+  uint64_t data = __builtin_bswap64(*(uint64_t *)ptr);
+  return *(double *)&data;
+}
 
 void ZipFileParser::parse() {
   // do some checking
@@ -31,6 +33,7 @@ void ZipFileParser::parse() {
   }
   gigabuffer = (char *)mmap(NULL, filelen, PROT_READ, MAP_SHARED, fd, 0);
   close(fd);
+  INFO("zipfile size: %.3lfGB", filelen * 1e-9);
 
   // parse end of central directory record
   char *ptr = gigabuffer + filelen - 22;
@@ -92,7 +95,6 @@ void ZipFileParser::parse() {
     ptr += header->extra_field_length;
     filesMeta[idx].buffer = ptr;
     ptr += filesMeta[idx].size;
-    printf("%s %lu\n", filename.c_str(), filesMeta[idx].size);
     if (i + 1 < n_entries_in_central_directory) {
       int counter = 0;
       while (read_uint32(ptr) != kLocalFileHeaderSignature) {
@@ -309,13 +311,8 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
   };
   actions[BINFLOAT] = [this]() {
     iterator++;
-    /*
-    puts("");
-    for (int i = 0; i < 8; i++)
-      printf("%02x", (uint8_t)iterator[i]);
-    printf(" %.20lf\n", *(double *)iterator);
-    */
-    stack.emplace_back(std::make_shared<object>(*(double *)iterator));
+    double value = read_big_endian_double(iterator);
+    stack.emplace_back(std::make_shared<object>(value));
     iterator += 8;
   };
   actions[BININT] = [this]() {
@@ -414,11 +411,13 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
     iterator++;
     uint32_t idx = read_uint8(iterator);
     iterator++;
-    try {
-      stack.emplace_back(memo[idx]);
-    } catch (...) {
-      assert(0);
-    }
+    stack.emplace_back(memo[idx]);
+  };
+  actions[LONG_BINGET] = [this]() {
+    iterator++;
+    uint32_t idx = read_uint32(iterator);
+    iterator += 4;
+    stack.emplace_back(memo[idx]);
   };
   actions[BINPUT] = [this]() {
     iterator++;
@@ -574,19 +573,38 @@ void PyTorchModelManager::load() {
       storageMap[it->string()] = file.buffer;
     }
   }
+  INFO("number of storage in checkpoint: %lu", storageMap.size());
 
   // load data.pkl
   auto it = fileReader->nameIdxMap.find(modelname + "/data.pkl");
   assert(it != fileReader->nameIdxMap.end());
-  INFO("found data.pkl, now unpickling%s", "...");
-  auto &modelconf   = filesMeta[it->second];
-  unpickler         = std::make_shared<LazyUnpickler>(modelconf, std::move(storageMap));
+  auto &conf = filesMeta[it->second];
+  INFO("found data.pkl, now unpickling. data.pkl size: %.3lf MB", conf.size * 1e-6);
+  make_memmove_advise(conf.buffer, conf.size, MADV_SEQUENTIAL | MADV_WILLNEED);
+  unpickler         = std::make_shared<LazyUnpickler>(conf, std::move(storageMap));
   auto parse_start  = ch::high_resolution_clock::now();
   auto parse_result = unpickler->unpickle();
   auto parse_end    = ch::high_resolution_clock::now();
-  INFO("data.pkl parsed successfully in %ld ms",
-       ch::duration_cast<ch::milliseconds>(parse_end - parse_start).count());
-  INFO("parsed data:\n%s", parse_result->to_string().c_str());
+  INFO("data.pkl parsed successfully in %.3lf ms",
+       ch::duration_cast<ch::microseconds>(parse_end - parse_start).count() * 1e-3);
+
+  // record tensor metadata
+  auto state_dict = parse_result->query_dict("state_dict");
+  if (state_dict == nullptr) {
+    INFO("state_dict not found, aborted...%s", "");
+  } else {
+    INFO("found state_dict, displaying %ld tensor(s)", state_dict->children.size() / 2);
+    assert(state_dict->type == LazyUnpickler::object::object_t::ORDERED_DICT);
+    const auto &vec = state_dict->children;
+    for (size_t i = 0; i < vec.size(); i += 2) {
+      if (vec[i]->check_type<std::string>() && vec[i + 1]->is_tensor()) {
+        auto key       = vec[i]->extract_basic_type<std::string>();
+        auto val       = vec[i + 1]->tensor;
+        tensorMap[key] = val;
+        INFO("|-- (%lu): %s: %s", tensorMap.size(), key.c_str(), val->to_string().c_str());
+      }
+    }
+  }
 
   loaded = true;
 }

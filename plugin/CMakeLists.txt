@@ -24,7 +24,7 @@ append_torchlib_if_found(torch_python)
 set(DEFAULT_BUILD_TYPE "RelWithDebInfo")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall -lrt -UNDEBUG")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall -lrt -UNDEBUG -O2 -march=native")
 # INSTALL_RPATH_USE_LINK_PATH prevents INSTALL_RPATH from overwriting linked libraries
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 

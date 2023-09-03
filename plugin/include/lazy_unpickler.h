@@ -165,27 +165,40 @@ public:
       }
     }
 
-    bool is_storage() { return type == LEAF && data.index() == 0 && storage != nullptr; }
-    bool is_tensor() { return type == LEAF && data.index() == 0 && tensor != nullptr; }
-    bool is_empty() { return type != LEAF && children.size() == 0; }
+    bool is_storage() const { return type == LEAF && data.index() == 0 && storage != nullptr; }
+    bool is_tensor() const { return type == LEAF && data.index() == 0 && tensor != nullptr; }
+    bool is_empty() const { return type != LEAF && children.size() == 0; }
 
-    template <typename T> T extract_basic_type() {
+    template <typename T> bool check_type() const {
+      return type == LEAF && std::holds_alternative<T>(data);
+    }
+    template <typename T> T extract_basic_type() const {
       assert(type == LEAF && std::holds_alternative<T>(data));
       return std::get<T>(data);
     }
 
-    std::shared_ptr<Storage> extract_storage() {
+    std::shared_ptr<Storage> extract_storage() const {
       assert(type == LEAF && data.index() == 0);
       return storage;
     }
 
-    template <typename T> std::vector<T> extract_int_tuple() {
+    template <typename T> std::vector<T> extract_int_tuple() const {
       assert(type == TUPLE);
       std::vector<T> ret;
-      for (auto &child : children) {
+      for (const auto &child : children) {
         ret.push_back((T)child->extract_basic_type<int64_t>());
       }
       return ret;
+    }
+
+    std::shared_ptr<object> query_dict(std::string key) const {
+      assert(type == DICT || type == ORDERED_DICT);
+      for (size_t i = 0; i < children.size(); i += 2) {
+        if (children[i]->check_type<std::string>() &&
+            children[i]->extract_basic_type<std::string>() == key)
+          return children[i + 1];
+      }
+      return nullptr;
     }
 
     std::string get_type_name(object_t value);
@@ -215,6 +228,7 @@ private:
     GLOBAL      = 0x63,
     APPENDS     = 0x65,
     BINGET      = 0x68,
+    LONG_BINGET = 0x6a,
     BINPUT      = 0x71,
     LONG_BINPUT = 0x72,
     SETITEM     = 0x73,
@@ -251,6 +265,7 @@ private:
   std::string modelname;
   std::shared_ptr<ZipFileParser> fileReader;
   std::shared_ptr<LazyUnpickler> unpickler;
+  std::map<std::string, std::shared_ptr<UntypedTensor>> tensorMap;
   bool loaded;
 
 public:

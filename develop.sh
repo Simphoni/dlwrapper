@@ -11,6 +11,7 @@ else
     fi
 fi
 unset __conda_setup
-conda activate nerf
+conda activate /cpfs01/user/xingjingze/condaenv
 cd plugin
+rm -r build
 pip install -v -e .
