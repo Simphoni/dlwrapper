@@ -1,3 +1,5 @@
+#pragma once
+
 #include "misc.h"
 #include "tensor.h"
 #include <fcntl.h>
@@ -107,7 +109,7 @@ public:
   void parse();
 };
 
-class LazyUnpickler {
+class __attribute__((visibility("default"))) FastUnpickler {
   // A unpickler that keeps references to large objects via file mapping. It
   // is part of a hierarchical model mananagement module.
 private:
@@ -119,7 +121,6 @@ private:
   std::function<void()> actions[256];
   char *iterator;
 
-public:
   struct object {
     enum object_t : uint8_t {
       NONE = 1,
@@ -152,10 +153,10 @@ public:
         : type(type), children(children) {}
 
     void extend_attr(std::shared_ptr<object> dict) {
+      assert(dict->type == DICT || dict->type == ORDERED_DICT);
       if (attr == std::nullopt) {
         attr = std::map<std::string, std::shared_ptr<object>>();
       }
-      assert(dict->type == DICT || dict->type == ORDERED_DICT);
       for (size_t i = 0; i < dict->children.size(); i += 2) {
         if (dict->children[i]->type == LEAF || dict->children[i]->data.index() == 1) {
           auto key   = std::get<std::string>(dict->children[i]->data);
@@ -191,22 +192,16 @@ public:
       return ret;
     }
 
-    std::shared_ptr<object> query_dict(std::string key) const {
-      assert(type == DICT || type == ORDERED_DICT);
-      for (size_t i = 0; i < children.size(); i += 2) {
-        if (children[i]->check_type<std::string>() &&
-            children[i]->extract_basic_type<std::string>() == key)
-          return children[i + 1];
-      }
-      return nullptr;
-    }
+    // simulated dict query
+    std::shared_ptr<object> query_dict(std::string key) const;
+    bool is_strkv() const;
 
+    // export to human readable / python object
     std::string get_type_name(object_t value);
     std::string to_string();
     py::object to_pyobject() const;
   };
 
-private:
   std::vector<std::shared_ptr<object>> stack;
   std::unordered_map<uint32_t, std::shared_ptr<object>> memo;
 
@@ -250,27 +245,12 @@ private:
   void pytorchPersistentId(std::shared_ptr<object> tuple);
   std::shared_ptr<UntypedTensor> torch_util_rebuild_tensor_v2(std::shared_ptr<object> tuple);
 
+  friend class PyTorchModelManager;
+
 public:
-  LazyUnpickler() = delete;
-  LazyUnpickler(UnzippedFileMeta _file, std::unordered_map<std::string, char *> _storageMap);
+  FastUnpickler() = delete;
+  FastUnpickler(UnzippedFileMeta _file, std::unordered_map<std::string, char *> _storageMap);
 
   std::string readline();
   std::shared_ptr<object> unpickle();
-};
-
-class PyTorchModelManager {
-  // Support for PyTorch models
-private:
-  std::string filename;
-  std::string modelname;
-  std::shared_ptr<ZipFileParser> fileReader;
-  std::shared_ptr<LazyUnpickler> unpickler;
-  std::map<std::string, std::shared_ptr<UntypedTensor>> tensorMap;
-  bool loaded;
-
-public:
-  PyTorchModelManager() = default;
-  PyTorchModelManager(std::string filename) : filename(filename), loaded(false) {}
-
-  void load();
 };

@@ -1,8 +1,13 @@
-cmake_minimum_required(VERSION 3.27)
+cmake_minimum_required(VERSION 3.22)
 project(dlwrapper C CXX CUDA)
 find_package(Python3 COMPONENTS Interpreter Development)
 
-set(Python3_SITE_PACKAGES "${Python3_LIBRARY_DIRS}/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages")
+set(Python3_SHORT_VERSION "python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}")
+
+set(Python3_SITE_PACKAGES "${Python3_LIBRARY_DIRS}/${Python3_SHORT_VERSION}/site-packages")
+if (NOT EXISTS ${Python3_SITE_PACKAGES})
+    set(Python3_SITE_PACKAGES "$ENV{HOME}/.local/lib/${Python3_SHORT_VERSION}}/site-packages")
+endif()
 if (EXISTS ${Python3_SITE_PACKAGES})
     if (EXISTS ${Python3_SITE_PACKAGES}/torch)
         set(Torch_ROOT "${Python3_SITE_PACKAGES}/torch")

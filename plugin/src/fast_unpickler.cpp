@@ -1,8 +1,5 @@
-#include "lazy_unpickler.h"
-#include <chrono>
+#include "fast_unpickler.h"
 #include <pybind11/stl.h>
-
-namespace ch = std::chrono;
 
 void initalizePyInterp() {
   static bool initialized = false;
@@ -17,8 +14,12 @@ template <typename T> inline uint8_t read_uint8(T *ptr) noexcept { return *(uint
 template <typename T> inline uint16_t read_uint16(T *ptr) noexcept { return *(uint16_t *)ptr; }
 template <typename T> inline uint32_t read_uint32(T *ptr) { return *(uint32_t *)ptr; }
 double read_big_endian_double(char *ptr) {
-  uint64_t data = __builtin_bswap64(*(uint64_t *)ptr);
-  return *(double *)&data;
+  union u_double {
+    uint64_t data;
+    double value;
+  } u;
+  u.data = __builtin_bswap64(*(uint64_t *)ptr);
+  return u.value;
 }
 
 void ZipFileParser::parse() {
@@ -110,9 +111,29 @@ void ZipFileParser::parse() {
 
 ZipFileParser::~ZipFileParser() { munmap(gigabuffer, filelen); }
 
-// ------------------- LazyUnpickler -------------------
+// ------------------- FastUnpickler -------------------
 
-std::string LazyUnpickler::object::get_type_name(object_t value) {
+std::shared_ptr<FastUnpickler::object> FastUnpickler::object::query_dict(std::string key) const {
+  assert(type == FastUnpickler::object::DICT || type == FastUnpickler::object::ORDERED_DICT);
+  for (size_t i = 0; i < children.size(); i += 2) {
+    if (children[i]->check_type<std::string>() &&
+        children[i]->extract_basic_type<std::string>() == key)
+      return children[i + 1];
+  }
+  return nullptr;
+}
+
+bool FastUnpickler::object::is_strkv() const {
+  if (type != FastUnpickler::object::ORDERED_DICT || children.size() % 2 != 0)
+    return false;
+  for (size_t i = 0; i < children.size(); i += 2) {
+    if (!children[i]->check_type<std::string>())
+      return false;
+  }
+  return true;
+}
+
+std::string FastUnpickler::object::get_type_name(object_t value) {
   const char *s = 0;
 #define PROCESS_VAL(p)                                                                             \
   case (p):                                                                                        \
@@ -134,7 +155,7 @@ std::string LazyUnpickler::object::get_type_name(object_t value) {
   return std::string(s);
 }
 
-std::string LazyUnpickler::object::to_string() {
+std::string FastUnpickler::object::to_string() {
   if (type == LEAF) {
     if (data.index() == 1) {
       return "\"" + std::get<std::string>(data) + "\"";
@@ -173,7 +194,7 @@ std::string LazyUnpickler::object::to_string() {
   }
 }
 
-py::object LazyUnpickler::object::to_pyobject() const {
+py::object FastUnpickler::object::to_pyobject() const {
   assert(type != MARK);
   if (type == NONE) {
     return py::none();
@@ -215,7 +236,7 @@ py::object LazyUnpickler::object::to_pyobject() const {
   }
 }
 
-std::string LazyUnpickler::readline() {
+std::string FastUnpickler::readline() {
   char *tail = iterator;
   while (*tail != '\n')
     tail++;
@@ -241,7 +262,7 @@ uint64_t element_size(std::string dtype) {
   return size;
 }
 
-int LazyUnpickler::find_mark() {
+int FastUnpickler::find_mark() {
   assert(stack.size() > 0);
   int mark = stack.size() - 1;
   while (mark >= 0 && stack[mark]->type != object::object_t::MARK) {
@@ -263,7 +284,7 @@ std::pair<std::string, uint64_t> parseStorageType(std::string attr) {
   return std::make_pair(std::move(dtype), size);
 }
 
-void LazyUnpickler::pytorchPersistentId(std::shared_ptr<object> tuple) {
+void FastUnpickler::pytorchPersistentId(std::shared_ptr<object> tuple) {
   assert(tuple->type == object::object_t::TUPLE);
   assert(tuple->children.size() == 5);
   assert(tuple->children[0]->extract_basic_type<std::string>() == "storage");
@@ -282,7 +303,7 @@ void LazyUnpickler::pytorchPersistentId(std::shared_ptr<object> tuple) {
 }
 
 std::shared_ptr<UntypedTensor>
-LazyUnpickler::torch_util_rebuild_tensor_v2(std::shared_ptr<object> tuple) {
+FastUnpickler::torch_util_rebuild_tensor_v2(std::shared_ptr<object> tuple) {
   auto storage        = tuple->children[0]->extract_storage();
   auto offset         = tuple->children[1]->extract_basic_type<int64_t>();
   auto size           = tuple->children[2]->extract_int_tuple<int64_t>();
@@ -293,7 +314,7 @@ LazyUnpickler::torch_util_rebuild_tensor_v2(std::shared_ptr<object> tuple) {
   return std::make_shared<UntypedTensor>(storage, offset, size, stride, requires_grad);
 }
 
-LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
+FastUnpickler::FastUnpickler(UnzippedFileMeta _file,
                              std::unordered_map<std::string, char *> storageMap)
     : file(_file), storageMap(storageMap) {
   unpickled     = false;
@@ -512,7 +533,7 @@ LazyUnpickler::LazyUnpickler(UnzippedFileMeta _file,
   };
 }
 
-std::shared_ptr<LazyUnpickler::object> LazyUnpickler::unpickle() {
+std::shared_ptr<FastUnpickler::object> FastUnpickler::unpickle() {
   if (unpickled)
     return stack[0];
   stop_flag = false;
@@ -530,7 +551,7 @@ std::shared_ptr<LazyUnpickler::object> LazyUnpickler::unpickle() {
 
     if (print_debug_info) {
       numit++;
-      if (numit >= 2000)
+      if (numit >= 400)
         break;
     }
   }
@@ -542,69 +563,4 @@ std::shared_ptr<LazyUnpickler::object> LazyUnpickler::unpickle() {
   }
   assert(stack.size() == 1);
   return stack[0];
-}
-
-void PyTorchModelManager::load() {
-  if (loaded)
-    return;
-  initalizePyInterp();
-  // py::scoped_interpreter guard{};
-  INFO("loading model from %s", filename.c_str());
-  fileReader = std::make_shared<ZipFileParser>(filename);
-  fileReader->parse();
-
-  // validate model file format
-  std::vector<UnzippedFileMeta> &filesMeta = fileReader->filesMeta;
-  modelname = std::filesystem::path(filesMeta[0].filename).begin()->string();
-  INFO("found model name: %s", modelname.c_str());
-
-  // pass a simplified kv mapping to unpickler
-  std::unordered_map<std::string, char *> storageMap;
-  for (auto file : filesMeta) {
-    assert(file.filename.length() > 0);
-    auto pth = std::filesystem::path(file.filename);
-    auto it  = pth.begin();
-    assert(it->string() == modelname);
-    it++;
-    if (it->string() == "data") {
-      // it is a storage
-      it++;
-      assert(it != pth.end());
-      storageMap[it->string()] = file.buffer;
-    }
-  }
-  INFO("number of storage in checkpoint: %lu", storageMap.size());
-
-  // load data.pkl
-  auto it = fileReader->nameIdxMap.find(modelname + "/data.pkl");
-  assert(it != fileReader->nameIdxMap.end());
-  auto &conf = filesMeta[it->second];
-  INFO("found data.pkl, now unpickling. data.pkl size: %.3lf MB", conf.size * 1e-6);
-  make_memmove_advise(conf.buffer, conf.size, MADV_SEQUENTIAL | MADV_WILLNEED);
-  unpickler         = std::make_shared<LazyUnpickler>(conf, std::move(storageMap));
-  auto parse_start  = ch::high_resolution_clock::now();
-  auto parse_result = unpickler->unpickle();
-  auto parse_end    = ch::high_resolution_clock::now();
-  INFO("data.pkl parsed successfully in %.3lf ms",
-       ch::duration_cast<ch::microseconds>(parse_end - parse_start).count() * 1e-3);
-
-  // record tensor metadata
-  auto state_dict = parse_result->query_dict("state_dict");
-  if (state_dict == nullptr) {
-    INFO("state_dict not found, aborted...%s", "");
-  } else {
-    INFO("found state_dict, displaying %ld tensor(s)", state_dict->children.size() / 2);
-    assert(state_dict->type == LazyUnpickler::object::object_t::ORDERED_DICT);
-    const auto &vec = state_dict->children;
-    for (size_t i = 0; i < vec.size(); i += 2) {
-      if (vec[i]->check_type<std::string>() && vec[i + 1]->is_tensor()) {
-        auto key       = vec[i]->extract_basic_type<std::string>();
-        auto val       = vec[i + 1]->tensor;
-        tensorMap[key] = val;
-        INFO("|-- (%lu): %s: %s", tensorMap.size(), key.c_str(), val->to_string().c_str());
-      }
-    }
-  }
-
-  loaded = true;
 }
