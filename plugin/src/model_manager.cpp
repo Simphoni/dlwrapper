@@ -4,6 +4,12 @@
 #include <chrono>
 namespace ch = std::chrono;
 
+void initalizePyInterp() {
+  if (Py_IsInitialized() == 0) {
+    py::initialize_interpreter();
+  }
+}
+
 void PyTorchModelManager::load() {
   if (loaded)
     return;
@@ -41,34 +47,22 @@ void PyTorchModelManager::load() {
   auto &conf = filesMeta[it->second];
   INFO("found data.pkl, now unpickling. data.pkl size: %.3lf MB", conf.size * 1e-6);
   make_memmove_advise(conf.buffer, conf.size, MADV_SEQUENTIAL | MADV_WILLNEED);
-  unpickler         = std::make_shared<FastUnpickler>(conf, std::move(storageMap));
-  auto parse_start  = ch::high_resolution_clock::now();
-  auto parse_result = unpickler->unpickle();
-  auto parse_end    = ch::high_resolution_clock::now();
+  unpickler        = std::make_shared<FastUnpickler>(conf, std::move(storageMap));
+  auto parse_start = ch::high_resolution_clock::now();
+  parse_result     = unpickler->unpickle();
+  auto parse_end   = ch::high_resolution_clock::now();
   INFO("data.pkl parsed successfully in %.3lf ms",
        ch::duration_cast<ch::microseconds>(parse_end - parse_start).count() * 1e-3);
 
   // record tensor metadata
-  auto state_dict = parse_result->query_dict("state_dict");
-  if (state_dict == nullptr && parse_result->is_strkv()) {
-    state_dict = parse_result;
-  }
-  // INFO("%s\n", parse_result->to_string().c_str());
-  if (state_dict == nullptr) {
-    INFO("state_dict not found, aborted...%s", "");
-  } else {
-    INFO("found state_dict, displaying %ld tensor(s)", state_dict->children.size() / 2);
-    assert(state_dict->type == FastUnpickler::object::object_t::ORDERED_DICT);
-    const auto &vec = state_dict->children;
-    for (size_t i = 0; i < vec.size(); i += 2) {
-      if (vec[i]->check_type<std::string>() && vec[i + 1]->is_tensor()) {
-        auto key       = vec[i]->extract_basic_type<std::string>();
-        auto val       = vec[i + 1]->tensor;
-        tensorMap[key] = val;
-        INFO("|-- (%lu): %s: %s", tensorMap.size(), key.c_str(), val->to_string().c_str());
-      }
-    }
+  parse_result->read_all_tensors(tensorMap);
+  INFO("displaying %ld tensor(s)", tensorMap.size());
+  int cnt = 0;
+  for (auto &[key, val] : tensorMap) {
+    cnt++;
+    INFO("|-- (%d): %s: %s", cnt, key.c_str(), val->to_string().c_str());
   }
 
   loaded = true;
+  return;
 }

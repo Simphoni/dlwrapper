@@ -1,13 +1,6 @@
 #include "fast_unpickler.h"
+#include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-
-void initalizePyInterp() {
-  static bool initialized = false;
-  if (!initialized) {
-    initialized = true;
-    py::initialize_interpreter();
-  }
-}
 
 // used by unpickler when processing byte stream
 template <typename T> inline uint8_t read_uint8(T *ptr) noexcept { return *(uint8_t *)ptr; }
@@ -113,8 +106,8 @@ ZipFileParser::~ZipFileParser() { munmap(gigabuffer, filelen); }
 
 // ------------------- FastUnpickler -------------------
 
-std::shared_ptr<FastUnpickler::object> FastUnpickler::object::query_dict(std::string key) const {
-  assert(type == FastUnpickler::object::DICT || type == FastUnpickler::object::ORDERED_DICT);
+std::shared_ptr<internal_obj> internal_obj::query_dict(std::string key) const {
+  assert(type == internal_obj::DICT || type == internal_obj::ORDERED_DICT);
   for (size_t i = 0; i < children.size(); i += 2) {
     if (children[i]->check_type<std::string>() &&
         children[i]->extract_basic_type<std::string>() == key)
@@ -123,17 +116,25 @@ std::shared_ptr<FastUnpickler::object> FastUnpickler::object::query_dict(std::st
   return nullptr;
 }
 
-bool FastUnpickler::object::is_strkv() const {
-  if (type != FastUnpickler::object::ORDERED_DICT || children.size() % 2 != 0)
-    return false;
-  for (size_t i = 0; i < children.size(); i += 2) {
-    if (!children[i]->check_type<std::string>())
-      return false;
+void internal_obj::read_all_tensors(
+    std::map<std::string, std::shared_ptr<OriginTensor>> &tensors) const {
+  if (type == internal_obj::LEAF)
+    return;
+  if (type == internal_obj::ORDERED_DICT) {
+    for (size_t i = 0; i < children.size(); i += 2) {
+      if (children[i]->check_type<std::string>() && children[i + 1]->is_tensor()) {
+        auto key = children[i]->extract_basic_type<std::string>();
+        auto val = children[i + 1]->tensor;
+        tensors.insert(std::make_pair(key, val));
+      }
+    }
   }
-  return true;
+  for (size_t i = 0; i < children.size(); i++)
+    if (children[i]->type != internal_obj::LEAF)
+      children[i]->read_all_tensors(tensors);
 }
 
-std::string FastUnpickler::object::get_type_name(object_t value) {
+std::string internal_obj::get_type_name(object_t value) {
   const char *s = 0;
 #define PROCESS_VAL(p)                                                                             \
   case (p):                                                                                        \
@@ -155,7 +156,7 @@ std::string FastUnpickler::object::get_type_name(object_t value) {
   return std::string(s);
 }
 
-std::string FastUnpickler::object::to_string() {
+std::string internal_obj::to_string() {
   if (type == LEAF) {
     if (data.index() == 1) {
       return "\"" + std::get<std::string>(data) + "\"";
@@ -194,7 +195,7 @@ std::string FastUnpickler::object::to_string() {
   }
 }
 
-py::object FastUnpickler::object::to_pyobject() const {
+py::object internal_obj::to_pyobject() const {
   assert(type != MARK);
   if (type == NONE) {
     return py::none();
@@ -209,6 +210,8 @@ py::object FastUnpickler::object::to_pyobject() const {
       return py::cast(std::get<double>(data));
     } else if (pyobj != std::nullopt) {
       return pyobj.value();
+    } else if (tensor != nullptr) {
+      return py::cast(tensor);
     } else {
       assert(0);
     }
@@ -225,14 +228,46 @@ py::object FastUnpickler::object::to_pyobject() const {
     return type == TUPLE ? py::tuple(pylist) : pylist;
   } else if (type == DICT) {
     std::map<std::string, py::object> dict;
-    for (const auto &child : children) {
-      dict.insert(std::make_pair(child->children[0]->extract_basic_type<std::string>(),
-                                 child->children[1]->to_pyobject()));
+    for (size_t i = 0; i < children.size(); i += 2) {
+      assert(children[i]->check_type<std::string>());
+      dict.insert(std::make_pair(children[i]->extract_basic_type<std::string>(),
+                                 children[i + 1]->to_pyobject()));
     }
     return py::cast(dict);
+  } else if (type == ORDERED_DICT) {
+    py::object pydict = py::module_::import("collections").attr("OrderedDict")();
+    std::map<std::string, py::object> dict;
+    for (size_t i = 0; i < children.size(); i += 2) {
+      assert(children[i]->check_type<std::string>());
+      dict.insert(std::make_pair(children[i]->extract_basic_type<std::string>(),
+                                 children[i + 1]->to_pyobject()));
+    }
+    pydict.attr("update")(py::cast(dict));
+    if (attr != std::nullopt) {
+      std::map<std::string, py::object> pyattr;
+      for (auto &[k, v] : attr.value()) {
+        pyattr.insert(std::make_pair(k, v->to_pyobject()));
+      }
+      pydict.attr("__dict__").attr("update")(py::cast(pyattr));
+    }
+    return pydict;
   } else {
     fprintf(stderr, "not guarded");
     throw(std::runtime_error("Unsupported type"));
+  }
+}
+
+void internal_obj::extend_attr(std::shared_ptr<internal_obj> dict) {
+  assert(dict->type == DICT || dict->type == ORDERED_DICT);
+  if (attr == std::nullopt) {
+    attr = std::map<std::string, std::shared_ptr<object>>();
+  }
+  for (size_t i = 0; i < dict->children.size(); i += 2) {
+    if (dict->children[i]->type == LEAF || dict->children[i]->data.index() == 1) {
+      auto key   = std::get<std::string>(dict->children[i]->data);
+      auto value = dict->children[i + 1];
+      attr->insert(std::make_pair(key, value));
+    }
   }
 }
 
@@ -299,10 +334,10 @@ void FastUnpickler::pytorchPersistentId(std::shared_ptr<object> tuple) {
   auto it              = storageMap.find(key);
   assert(it != storageMap.end());
   stack.emplace_back(std::make_shared<object>(
-      std::make_shared<Storage>(it->second, dtype, location, numel, dsize)));
+      std::make_shared<CachedStorage>(it->second, dtype, location, numel, dsize)));
 }
 
-std::shared_ptr<UntypedTensor>
+std::shared_ptr<OriginTensor>
 FastUnpickler::torch_util_rebuild_tensor_v2(std::shared_ptr<object> tuple) {
   auto storage        = tuple->children[0]->extract_storage();
   auto offset         = tuple->children[1]->extract_basic_type<int64_t>();
@@ -311,7 +346,7 @@ FastUnpickler::torch_util_rebuild_tensor_v2(std::shared_ptr<object> tuple) {
   auto requires_grad  = tuple->children[4]->extract_basic_type<bool>();
   auto backward_hooks = tuple->children[5]; // backwards compatibility, expect empty ordered dict
   assert(backward_hooks->type == object::object_t::ORDERED_DICT);
-  return std::make_shared<UntypedTensor>(storage, offset, size, stride, requires_grad);
+  return std::make_shared<OriginTensor>(storage, offset, size, stride, requires_grad);
 }
 
 FastUnpickler::FastUnpickler(UnzippedFileMeta _file,
@@ -533,7 +568,7 @@ FastUnpickler::FastUnpickler(UnzippedFileMeta _file,
   };
 }
 
-std::shared_ptr<FastUnpickler::object> FastUnpickler::unpickle() {
+std::shared_ptr<internal_obj> FastUnpickler::unpickle() {
   if (unpickled)
     return stack[0];
   stop_flag = false;
@@ -555,6 +590,7 @@ std::shared_ptr<FastUnpickler::object> FastUnpickler::unpickle() {
         break;
     }
   }
+  unpickled = true;
   if (print_debug_info) {
     puts("");
     INFO("stack size: %ld", stack.size());

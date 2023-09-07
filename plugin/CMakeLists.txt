@@ -29,7 +29,7 @@ append_torchlib_if_found(torch_python)
 set(DEFAULT_BUILD_TYPE "RelWithDebInfo")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall -lrt -UNDEBUG -O2 -march=native")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall -lrt -UNDEBUG -O2")
 # INSTALL_RPATH_USE_LINK_PATH prevents INSTALL_RPATH from overwriting linked libraries
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
@@ -42,9 +42,10 @@ file(GLOB_RECURSE SRC_FFI ffi/*.cpp)
 file(GLOB_RECURSE SRC_STANDALONE standalone/*.cpp)
 
 add_library(dlwrapper SHARED ${SRC})
-pybind11_add_module(dlwrapperffi SHARED ${SRC_FFI})
 target_include_directories(dlwrapper PUBLIC ${TORCH_INCLUDE_DIRS})
 target_link_libraries(dlwrapper ${TORCH_LIBRARIES} ${Python3_LIBRARIES})
+
+pybind11_add_module(dlwrapperffi SHARED ${SRC_FFI})
 target_include_directories(dlwrapperffi PUBLIC ${TORCH_INCLUDE_DIRS})
 target_link_libraries(dlwrapperffi PRIVATE dlwrapper)
 
@@ -58,5 +59,5 @@ foreach(sourcefile ${SRC_STANDALONE})
     add_executable(${executable} ${sourcefile})
     set_target_properties(${executable} PROPERTIES INSTALL_RPATH "$ORIGIN")
     target_link_libraries(${executable} dlwrapper ${Python_LIBRARIES})
-    install(TARGETS ${executable} RUNTIME DESTINATION ${PY_BUILD_CMAKE_MODULE_NAME} COMPONENT torch_extension)
+    install(TARGETS ${executable} RUNTIME DESTINATION ${PY_BUILD_CMAKE_MODULE_NAME} COMPONENT)
 endforeach(sourcefile ${TEST_SOURCES})

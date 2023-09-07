@@ -16,13 +16,14 @@ All notable changes to DLWrapper will be documented in this file.
 - Support internode communication domains with NCCL
 - Implement lazy unpickler to manage PyTorch model files
 
-## 0.1.0 - 2023-9-2
+## 0.1.0 - 2023-9-7
 
 ### Added
 
 - Partial implementation of PyTorch model manager and its unpickler
 - Changed build system to py-build-cmake
 - Removed old `setup.py`
+- Refactored ffi code organization, exposed OriginTensor and PyTorchModelManager
 
 ### TODO
 
