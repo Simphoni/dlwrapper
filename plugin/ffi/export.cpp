@@ -9,5 +9,5 @@ PYBIND11_MODULE(dlwrapperffi, m) {
 
   auto m_torch_backend =
       m.def_submodule("torch_backend", "Pytorch model parsing and tensor management.");
-  init_ffi_tensor(m_torch_backend);
+  ffi::init_ffi_tensor(m_torch_backend);
 }

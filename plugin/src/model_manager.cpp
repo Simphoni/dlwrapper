@@ -60,6 +60,7 @@ void PyTorchModelManager::load() {
   int cnt = 0;
   for (auto &[key, val] : tensorMap) {
     cnt++;
+    val->set_name(key);
     INFO("|-- (%d): %s: %s", cnt, key.c_str(), val->to_string().c_str());
   }
 

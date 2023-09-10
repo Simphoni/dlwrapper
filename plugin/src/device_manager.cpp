@@ -33,13 +33,13 @@ void DeviceContextManager::set_comm_world(std::pair<ncclComm_t, int> _comm) {
   _mu.lock();
   assert(initialized == false);
   initialized = true;
-  comm = _comm.first;
-  worldRank = _comm.second >> 12;
-  worldSize = _comm.second & ((1 << 12) - 1);
-  nodeCount = worldSize / deviceCount;
+  comm        = _comm.first;
+  worldRank   = _comm.second >> 12;
+  worldSize   = _comm.second & ((1 << 12) - 1);
+  nodeCount   = worldSize / deviceCount;
   assert(nodeCount * deviceCount == worldSize);
   localRank = worldRank % deviceCount;
-  nodeRank = worldRank / deviceCount;
+  nodeRank  = worldRank / deviceCount;
 
   _streams = new cudaStream_t[MAX_STREAMS];
   for (int i = 0; i < MAX_STREAMS; i++) {
@@ -150,18 +150,18 @@ void DeviceContextManager::export_summary() {
 
 NicoProcessGroup::NicoProcessGroup(const std::vector<int> &_members, int ipc_key, int _group_id) {
   IPC_KEY_BASE = ipc_key;
-  groupId = _group_id;
+  groupId      = _group_id;
   members.resize(_members.size());
   std::copy(_members.begin(), _members.end(), members.begin());
   std::sort(members.begin(), members.end());
   auto it = std::unique(members.begin(), members.end());
   members.erase(it, members.end());
 
-  memberNum = members.size();
-  auto manager = DeviceContextManager::get();
+  memberNum       = members.size();
+  auto manager    = DeviceContextManager::get();
   int deviceCount = manager->get_device_count();
-  int worldRank = manager->get_world_rank();
-  groupRank = -1;
+  int worldRank   = manager->get_world_rank();
+  groupRank       = -1;
   for (int i = 0; i < memberNum; ++i) {
     assert(members[i] >= 0 && members[i] < DeviceContextManager::get()->get_world_size());
     if (members[i] == worldRank) {
@@ -245,22 +245,22 @@ void NicoProcessGroup::ipc_init_process_group() {
         groupId);
 }
 
-struct sembuf write_wait = {0, -1, 0};
+struct sembuf write_wait    = {0, -1, 0};
 struct sembuf write_exhaust = {0, 0, 0};
-struct sembuf read_wait = {1, -1, 0};
-struct sembuf read_exhaust = {1, 0, 0};
+struct sembuf read_wait     = {1, -1, 0};
+struct sembuf read_exhaust  = {1, 0, 0};
 std::vector<char> NicoProcessGroup::ipc_allgather(const void *input, size_t bytes) {
   // gather all `input` data into `recvbuf`
   // shared memory needn't remap to ensure coherence
   assert(ipcInitialized);
   assert(bytes <= IPC_PROC_SEG_SIZE);
   struct sembuf write_free = {0, (short)memberNum, 0};
-  struct sembuf read_free = {1, (short)memberNum, 0};
+  struct sembuf read_free  = {1, (short)memberNum, 0};
   std::vector<char> recvbuf(bytes * memberNum, 0);
 
   // data is placed tightly in shared memory
   int segmentOffset = groupRank * bytes;
-  int semid = _semid[SEM_IPC_ALLGATHER];
+  int semid         = _semid[SEM_IPC_ALLGATHER];
   if (isLeader) {
     semop(semid, &write_free, 1);
   }
@@ -300,4 +300,16 @@ NicoProcessGroup::ipc_allgather_device_pointer(const std::vector<void *> &ptrs) 
   ret.resize(items * memberNum);
   memcpy(ret.data(), raw_chars.data(), raw_chars.size());
   return ret;
+}
+
+DeviceMemoryManager *DeviceMemoryManager::_manager = nullptr;
+
+DeviceMemoryManager *DeviceMemoryManager::get() {
+  if (_manager != nullptr) // most cases
+    return _manager;
+  _mu.lock();
+  if (_manager == nullptr)
+    _manager = new DeviceMemoryManager();
+  _mu.unlock();
+  return _manager;
 }

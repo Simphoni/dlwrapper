@@ -1,7 +1,10 @@
 #pragma once
+#include "misc.h"
 #include "nv_common.h"
 #include <algorithm>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -18,10 +21,10 @@ class DeviceContextManager {
   // get the handles & streams from its singleton instance
   // see src/device_manager.cpp for implementation
 public:
-  static constexpr int MAX_PROCS = 8;
-  static constexpr int MAX_STREAMS = 4;
-  static constexpr int IPC_KEY_MASTER = 0x00001000;
-  static constexpr int IPC_KEY_PER_GROUP = 16;
+  static const int MAX_PROCS         = 8;
+  static const int MAX_STREAMS       = 8;
+  static const int IPC_KEY_MASTER    = 0x00001000;
+  static const int IPC_KEY_PER_GROUP = 16;
 
 private:
   static DeviceContextManager *_manager;
@@ -47,7 +50,7 @@ private:
 
   DeviceContextManager() {
     // create singleton instance
-    initialized = false;
+    initialized       = false;
     peerAccessEnabled = false;
     cudaGetDeviceCount(&deviceCount);
     assert(deviceCount > 0);
@@ -102,10 +105,10 @@ class NicoProcessGroup {
   //! otherwise shmget() with fixed key will fail on the next run
   // see src/device_manager.cpp for implementation
 public:
-  static constexpr int MAX_PROCS = 8;
+  static constexpr int MAX_PROCS             = 8;
   static constexpr size_t IPC_SHMEM_SEG_SIZE = 1ul << 12; //! do not change
-  static constexpr size_t IPC_PROC_SEG_SIZE = IPC_SHMEM_SEG_SIZE / MAX_PROCS;
-  static constexpr int MAX_CUDA_MEM_HANDLES = IPC_PROC_SEG_SIZE / CUDA_IPC_HANDLE_SIZE;
+  static constexpr size_t IPC_PROC_SEG_SIZE  = IPC_SHMEM_SEG_SIZE / MAX_PROCS;
+  static constexpr int MAX_CUDA_MEM_HANDLES  = IPC_PROC_SEG_SIZE / CUDA_IPC_HANDLE_SIZE;
 
 private:
   int IPC_KEY_BASE;
@@ -113,7 +116,7 @@ private:
 
   enum semUsage : int {
     SEM_IPC_ALLGATHER = 0, // IPC allgather before collective calls
-    SEM_GPU_COLL = 1,      // GPU allgather barriers
+    SEM_GPU_COLL      = 1, // GPU allgather barriers
     SEM_TOTAL,
   };
 
@@ -152,4 +155,38 @@ public:
   void allgather_cuda_uva(char *dst, char *src, int64_t numel_dst, int64_t numel_src,
                           bool prof = false);
   void scatter_cuda_uva(char *data, int src_rank, int64_t numel_dst, bool prof = false);
+};
+
+class DeviceMemoryManager {
+  // Accepts delegates from user to manage device memory
+private:
+  static const int MAX_STREAMS = 8; // exclusive move streams
+  size_t delegated_size;
+  char *delegated_ptr;
+  cudaStream_t streams[MAX_STREAMS];
+  static std::mutex mu;
+
+  static DeviceMemoryManager *_manager;
+
+  DeviceMemoryManager() {
+    for (int i = 0; i < MAX_STREAMS; i++) {
+      CUDA_SAFE_CALL(cudaStreamCreate(&streams[i]));
+    }
+  }
+
+public:
+  static DeviceMemoryManager *get();
+
+  cudaStream_t get_move_stream() {
+    static int it = 0;
+    (it += 1) %= MAX_STREAMS;
+    return streams[it];
+  }
+
+  // return fixed-size memory that will not be collected
+  char *get_fixed(size_t size) {
+    char *ret;
+    cudaMalloc(&ret, size);
+    return ret;
+  }
 };
