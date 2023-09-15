@@ -6,6 +6,7 @@
 #include <torch/extension.h>
 
 namespace py = pybind11;
+using py::literals::operator""_a;
 
 namespace ffi {
 void init_ffi_nico(py::module_ &m);

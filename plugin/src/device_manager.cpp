@@ -5,7 +5,7 @@
 #include <unistd.h>
 namespace ch = std::chrono;
 
-static std::mutex _mu; // for singleton instance
+std::mutex DeviceContextManager::_mu{};
 DeviceContextManager *DeviceContextManager::_manager = nullptr;
 
 void DeviceContextManager::destroy_existing_pg() {
@@ -302,6 +302,7 @@ NicoProcessGroup::ipc_allgather_device_pointer(const std::vector<void *> &ptrs) 
   return ret;
 }
 
+std::mutex DeviceMemoryManager::_mu{};
 DeviceMemoryManager *DeviceMemoryManager::_manager = nullptr;
 
 DeviceMemoryManager *DeviceMemoryManager::get() {

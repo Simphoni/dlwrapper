@@ -8,9 +8,18 @@ ckpt = dlwrapper.ModelManagerTorch(
 )
 
 result = ckpt.load()["state_dict"]
-tensor = result["app_plane.2"]
-print(tensor.shape)
-tensor.segment = [1, 4, 192, 1, 1]
-grid = tensor.create_tensor_grid()
+print(ckpt.load())
+otensor = result["app_plane.0"]
+print(otensor.shape)
+otensor.segment = [1, 48, 192, 1, 1]
+grid = otensor.create_tensor_grid()
 slice = grid.get_slice(0)
 print(slice)
+ret = slice.move_to(dlwrapper.MemoryType.PINNED)
+print(ret)
+slice.wait()
+ret = slice.move_to(dlwrapper.MemoryType.DEVICE)
+print(ret)
+slice.wait()
+a = slice.torch_get_contiguous(dlwrapper.MemoryType.DEVICE)
+print(a)

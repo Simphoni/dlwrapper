@@ -1,14 +1,14 @@
 #include "host_manager.h"
 
-std::mutex HostMemoryManager::singleton_mutex{};
+std::mutex HostMemoryManager::_mu{};
 HostMemoryManager *HostMemoryManager::_manager = nullptr;
 
 HostMemoryManager *HostMemoryManager::get() {
   if (_manager != nullptr) // most cases
     return _manager;
-  singleton_mutex.lock();
+  _mu.lock();
   if (_manager == nullptr)
     _manager = new HostMemoryManager();
-  singleton_mutex.unlock();
+  _mu.unlock();
   return _manager;
 }

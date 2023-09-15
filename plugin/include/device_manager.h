@@ -27,6 +27,7 @@ public:
   static const int IPC_KEY_PER_GROUP = 16;
 
 private:
+  static std::mutex _mu;
   static DeviceContextManager *_manager;
   cudaStream_t *_streams;
   ncclComm_t comm;
@@ -164,8 +165,8 @@ private:
   size_t delegated_size;
   char *delegated_ptr;
   cudaStream_t streams[MAX_STREAMS];
-  static std::mutex mu;
 
+  static std::mutex _mu;
   static DeviceMemoryManager *_manager;
 
   DeviceMemoryManager() {
@@ -186,7 +187,7 @@ public:
   // return fixed-size memory that will not be collected
   char *get_fixed(size_t size) {
     char *ret;
-    cudaMalloc(&ret, size);
+    CUDA_SAFE_CALL(cudaMalloc(&ret, size));
     return ret;
   }
 };
