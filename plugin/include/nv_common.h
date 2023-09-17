@@ -36,4 +36,4 @@ inline void _nccl_safe_call(ncclResult_t err, const char *file, int line) {
   }
 }
 
-#endif
+#endif // PLUGIN_ENABLE_NCCL

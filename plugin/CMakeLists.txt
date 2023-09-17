@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 project(dlwrapper C CXX CUDA)
 find_package(Python3 COMPONENTS Interpreter Development)
 
+# vscode cmake extension helper
 set(Python3_SHORT_VERSION "python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}")
 
 set(Python3_SITE_PACKAGES "${Python3_LIBRARY_DIRS}/${Python3_SHORT_VERSION}/site-packages")
@@ -21,6 +22,15 @@ if (EXISTS ${Python3_SITE_PACKAGES})
     endif()
 endif()
 
+set(CCACHE_EXECUTABLE "/usr/local/bin/ccache")
+if (EXISTS ${CCACHE_EXECUTABLE})
+    message(STATUS "Using ccache: ${CCACHE_EXECUTABLE}")
+    set(CMAKE_C_LAUNCHER ${CCACHE_EXECUTABLE})
+    set(CMAKE_CXX_LAUNCHER ${CCACHE_EXECUTABLE})
+    set(CMAKE_CUDA_LAUNCHER ${CCACHE_EXECUTABLE})
+endif()
+
+set(TORCH_CUDA_ARCH_LIST "8.0")
 find_package(Torch REQUIRED)
 find_package(pybind11 REQUIRED)
 # provide pybind11 casts for pytorch classes
@@ -30,6 +40,11 @@ set(DEFAULT_BUILD_TYPE "RelWithDebInfo")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -Wall -lrt -UNDEBUG -O2")
+
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+
 # INSTALL_RPATH_USE_LINK_PATH prevents INSTALL_RPATH from overwriting linked libraries
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
@@ -37,7 +52,7 @@ include_directories(${Python3_INCLUDE_DIRS})
 include_directories(${CUDA_INCLUDE_DIRS})
 include_directories(include)
 
-file(GLOB_RECURSE SRC src/*.cpp)
+file(GLOB_RECURSE SRC src/*.cpp src/cuda/*.cu)
 file(GLOB_RECURSE SRC_FFI ffi/*.cpp)
 file(GLOB_RECURSE SRC_STANDALONE standalone/*.cpp)
 
@@ -50,7 +65,6 @@ target_include_directories(dlwrapperffi PUBLIC ${TORCH_INCLUDE_DIRS})
 target_link_libraries(dlwrapperffi PRIVATE dlwrapper)
 
 set_target_properties(dlwrapper dlwrapperffi PROPERTIES INSTALL_RPATH "$ORIGIN")
-set_target_properties(dlwrapper dlwrapperffi PROPERTIES CUDA_ARCHITECTURES "70;80;86")
 install(TARGETS dlwrapper LIBRARY DESTINATION ${PY_BUILD_CMAKE_MODULE_NAME} COMPONENT torch_extension)
 install(TARGETS dlwrapperffi LIBRARY DESTINATION ${PY_BUILD_CMAKE_MODULE_NAME} COMPONENT torch_extension)
 
