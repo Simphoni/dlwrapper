@@ -252,6 +252,7 @@ __global__ static void grid_sample_3d_ndhwc2ncdhw(const scalar_t *__restrict__ i
       }
     }
     __syncwarp(mask);
+
     for (int nanoit = 0; nanoit < nanobatch; nanoit++) {
       int const job_idx = it + nanoit;
       if (job_idx >= njobs) {
@@ -269,43 +270,9 @@ __global__ static void grid_sample_3d_ndhwc2ncdhw(const scalar_t *__restrict__ i
       index_t ix_tnw = static_cast<index_t>(::floor(ix));
       index_t iy_tnw = static_cast<index_t>(::floor(iy));
       index_t iz_tnw = static_cast<index_t>(::floor(iz));
-
-      index_t ix_tne = ix_tnw + 1;
-      index_t iy_tne = iy_tnw;
-      index_t iz_tne = iz_tnw;
-
-      index_t ix_tsw = ix_tnw;
-      index_t iy_tsw = iy_tnw + 1;
-      index_t iz_tsw = iz_tnw;
-
-      index_t ix_tse = ix_tnw + 1;
-      index_t iy_tse = iy_tnw + 1;
-      index_t iz_tse = iz_tnw;
-
-      index_t ix_bnw = ix_tnw;
-      index_t iy_bnw = iy_tnw;
-      index_t iz_bnw = iz_tnw + 1;
-
-      index_t ix_bne = ix_tnw + 1;
-      index_t iy_bne = iy_tnw;
-      index_t iz_bne = iz_tnw + 1;
-
-      index_t ix_bsw = ix_tnw;
-      index_t iy_bsw = iy_tnw + 1;
-      index_t iz_bsw = iz_tnw + 1;
-
       index_t ix_bse = ix_tnw + 1;
       index_t iy_bse = iy_tnw + 1;
       index_t iz_bse = iz_tnw + 1;
-
-      float tnw = (ix_bse - ix) * (iy_bse - iy) * (iz_bse - iz);
-      float tne = (ix - ix_bsw) * (iy_bsw - iy) * (iz_bsw - iz);
-      float tsw = (ix_bne - ix) * (iy - iy_bne) * (iz_bne - iz);
-      float tse = (ix - ix_bnw) * (iy - iy_bnw) * (iz_bnw - iz);
-      float bnw = (ix_tse - ix) * (iy_tse - iy) * (iz - iz_tse);
-      float bne = (ix - ix_tsw) * (iy_tsw - iy) * (iz - iz_tsw);
-      float bsw = (ix_tne - ix) * (iy - iy_tne) * (iz - iz_tne);
-      float bse = (ix - ix_tnw) * (iy - iy_tnw) * (iz - iz_tnw);
 
       if (c_offset < c) {
         float sum = 0;
@@ -316,41 +283,60 @@ __global__ static void grid_sample_3d_ndhwc2ncdhw(const scalar_t *__restrict__ i
         int inp_sH = w * c;
         int inp_sW = c;
 
-        if (inrange(iz_tnw, d)) {
-          if (inrange(iy_tnw, h)) {
-            if (inrange(ix_tnw, w)) {
-              sum += tnw * input_base[0];
+        if (0 <= iz_tnw && iz_bse < d && 0 <= iy_tnw && iy_bse < h && 0 <= ix_tnw && ix_bse < w) {
+          // strictly inside
+          float tnw = (ix_bse - ix) * (iy_bse - iy);
+          float tne = (ix - ix_tnw) * (iy_bse - iy);
+          float tsw = (ix_bse - ix) * (iy - iy_tnw);
+          float tse = (ix - ix_tnw) * (iy - iy_tnw);
+          // clang-format off
+          sum += (tnw * input_base[0] +
+                  tne * input_base[inp_sW] +
+                  tsw * input_base[inp_sH] +
+                  tse * input_base[inp_sH + inp_sW]) * (iz_bse - iz);
+          input_base += inp_sD;
+          sum += (tnw * input_base[0] +
+                  tne * input_base[inp_sW] +
+                  tsw * input_base[inp_sH] +
+                  tse * input_base[inp_sH + inp_sW]) * (iz - iz_tnw);
+          // clang-format on
+        } else {
+          float tnw = (ix_bse - ix) * (iy_bse - iy) * (iz_bse - iz);
+          float tne = (ix - ix_tnw) * (iy_bse - iy) * (iz_bse - iz);
+          float tsw = (ix_bse - ix) * (iy - iy_tnw) * (iz_bse - iz);
+          float tse = (ix - ix_tnw) * (iy - iy_tnw) * (iz_bse - iz);
+          float bnw = (ix_bse - ix) * (iy_bse - iy) * (iz - iz_tnw);
+          float bne = (ix - ix_tnw) * (iy_bse - iy) * (iz - iz_tnw);
+          float bsw = (ix_bse - ix) * (iy - iy_tnw) * (iz - iz_tnw);
+          float bse = (ix - ix_tnw) * (iy - iy_tnw) * (iz - iz_tnw);
+          if (inrange(iz_tnw, d)) {
+            if (inrange(iy_tnw, h)) {
+              if (inrange(ix_tnw, w))
+                sum += tnw * input_base[0];
+              if (inrange(ix_tnw + 1, w))
+                sum += tne * input_base[inp_sW];
             }
-            if (inrange(ix_tnw + 1, w)) {
-              sum += tne * input_base[inp_sW];
+            if (inrange(iy_tnw + 1, h)) {
+              if (inrange(ix_tnw, w))
+                sum += tsw * input_base[inp_sH];
+              if (inrange(ix_tnw + 1, w))
+                sum += tse * input_base[inp_sH + inp_sW];
             }
           }
-          if (inrange(iy_tnw + 1, h)) {
-            if (inrange(ix_tnw, w)) {
-              sum += tsw * input_base[inp_sH];
-            }
-            if (inrange(ix_tnw + 1, w)) {
-              sum += tse * input_base[inp_sH + inp_sW];
-            }
-          }
-        }
-        input_base += inp_sD;
+          input_base += inp_sD;
 
-        if (inrange(iz_tnw + 1, d)) {
-          if (inrange(iy_tnw, h)) {
-            if (inrange(ix_tnw, w)) {
-              sum += bnw * input_base[0];
+          if (inrange(iz_tnw + 1, d)) {
+            if (inrange(iy_tnw, h)) {
+              if (inrange(ix_tnw, w))
+                sum += bnw * input_base[0];
+              if (inrange(ix_tnw + 1, w))
+                sum += bne * input_base[inp_sW];
             }
-            if (inrange(ix_tnw + 1, w)) {
-              sum += bne * input_base[inp_sW];
-            }
-          }
-          if (inrange(iy_tnw + 1, h)) {
-            if (inrange(ix_tnw, w)) {
-              sum += bsw * input_base[inp_sH];
-            }
-            if (inrange(ix_tnw + 1, w)) {
-              sum += bse * input_base[inp_sH + inp_sW];
+            if (inrange(iy_tnw + 1, h)) {
+              if (inrange(ix_tnw, w))
+                sum += bsw * input_base[inp_sH];
+              if (inrange(ix_tnw + 1, w))
+                sum += bse * input_base[inp_sH + inp_sW];
             }
           }
         }

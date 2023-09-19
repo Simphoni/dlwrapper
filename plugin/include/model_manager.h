@@ -7,7 +7,7 @@
 #include <optional>
 #include <string>
 
-class PyTorchModelManager {
+class __attribute__((visibility("default"))) PyTorchModelManager {
   // Support for PyTorch models
 private:
   std::string filename;
