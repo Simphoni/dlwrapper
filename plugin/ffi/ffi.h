@@ -11,4 +11,5 @@ using py::literals::operator""_a;
 namespace ffi {
 void init_ffi_nico(py::module_ &m);
 void init_ffi_tensor(py::module_ &m);
+void init_ffi_cuda_native(py::module_ &m);
 } // namespace ffi

@@ -10,4 +10,7 @@ PYBIND11_MODULE(dlwrapperffi, m) {
   auto m_torch_backend =
       m.def_submodule("torch_backend", "Pytorch model parsing and tensor management.");
   ffi::init_ffi_tensor(m_torch_backend);
+
+  auto m_cuda = m.def_submodule("cuda", "Optimized high performance CUDA kernels.");
+  ffi::init_ffi_cuda_native(m_cuda);
 }
