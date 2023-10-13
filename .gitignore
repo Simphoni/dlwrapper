@@ -8,3 +8,4 @@ dist/
 core.*
 .py-build-cmake_cache/
 *.th
+*.pt

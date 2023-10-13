@@ -51,4 +51,4 @@ for k1, v1 in ans_ckpt.items():
     b //= 4
     t1 = v1[x * a : (x + 1) * a, y * b : (y + 1) * b]
     t2 = slice.torch_get_contiguous(dlwrapper.MemoryType.DEVICE)
-    print(t1 == t2)
+    print(torch.all(t1.eq(t2)))
