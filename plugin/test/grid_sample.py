@@ -64,17 +64,19 @@ ans = torch.nn.functional.grid_sample(
     input, sample_grid, align_corners=True, mode="bilinear"
 )
 
-perf_custom(input_T, sample_grid, False, 128, 128)
+tuner = 384
+
+perf_custom(input_T, sample_grid, False, tuner, tuner)
 out = run_custom_sampler(input_T, sample_grid, False)
 out = out.permute(0, 4, 1, 2, 3).contiguous()
 diff = (out - ans).abs()
 print(f"max absolute error: {diff.max()}")
 
-perf_custom(input_T, sample_grid, True, 128, 128)
+perf_custom(input_T, sample_grid, True, tuner, tuner)
 out = run_custom_sampler(input_T, sample_grid, True)
 diff = (out - ans).abs()
 safe_ans = ans.abs().clamp(min=1e-5)
 print(f"max absolute error: {diff.max()}")
 
 
-perf_torch(input, sample_grid, 128, 128)
+perf_torch(input, sample_grid, tuner, tuner)

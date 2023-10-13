@@ -209,10 +209,9 @@ __device__ __forceinline__ int calc_channel_roundup(int c) {
 }
 
 // adopting a rough strategy that doesn't tile channel can bring more opportunities
-template <typename scalar_t>
-__global__ void grid_sample_3d_ndhwc2ndhwc_rough(scalar_t *__restrict__ input,
-                                                 scalar_t *__restrict__ sample_grid,
-                                                 scalar_t *__restrict__ output, int n, int d, int h,
+__global__ void grid_sample_3d_ndhwc2ndhwc_rough(float *__restrict__ input,
+                                                 float *__restrict__ sample_grid,
+                                                 float *__restrict__ output, int n, int d, int h,
                                                  int w, int c, int batch_size) {
   int const threadid   = threadIdx.x + threadIdx.y * blockDim.x;
   int const blockid    = blockIdx.x + blockIdx.y * gridDim.x;
@@ -275,9 +274,9 @@ __global__ void grid_sample_3d_ndhwc2ndhwc_rough(scalar_t *__restrict__ input,
 
       if (c_offset < c) {
         float sum = 0;
-        scalar_t *input_base =
+        float *input_base =
             input + (((n_idx * d + iz_tnw) * h + iy_tnw) * w + ix_tnw) * c + c_offset;
-        scalar_t *output_base = output + job_idx * c + c_offset;
+        float *output_base = output + job_idx * c + c_offset;
 
         int inp_sD = h * w * c;
         int inp_sH = w * c;
@@ -529,7 +528,7 @@ void launch_grid_sample_3d_float(float *input, float *sample_grid, float *output
         input, sample_grid, output, n, d, h, w, c, batch_size);
   } else {
     if (should_use_rough(c)) {
-      GridSampler::grid_sample_3d_ndhwc2ndhwc_rough<float><<<grid_size, block_size, 0, stream>>>(
+      GridSampler::grid_sample_3d_ndhwc2ndhwc_rough<<<grid_size, block_size, 0, stream>>>(
           input, sample_grid, output, n, d, h, w, c, batch_size);
     } else {
       GridSampler::grid_sample_3d_ndhwc2ndhwc<float><<<grid_size, block_size, 0, stream>>>(
